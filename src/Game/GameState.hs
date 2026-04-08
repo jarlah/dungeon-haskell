@@ -1,6 +1,7 @@
 module Game.GameState
   ( GameState(..)
-  , initialGameState
+  , mkGameState
+  , hardcodedInitialState
   , hardcodedRoom
   , applyAction
   ) where
@@ -36,12 +37,17 @@ hardcodedRoom = DungeonLevel
            then Wall
            else Floor
 
-initialGameState :: GameState
-initialGameState = GameState
-  { gsLevel     = hardcodedRoom
-  , gsPlayerPos = V2 5 5
+-- | Construct a game state from a dungeon level and a player start.
+mkGameState :: DungeonLevel -> Pos -> GameState
+mkGameState dl start = GameState
+  { gsLevel     = dl
+  , gsPlayerPos = start
   , gsQuitting  = False
   }
+
+-- | Legacy Milestone-1 starting state (hardcoded room). Kept as a fixture.
+hardcodedInitialState :: GameState
+hardcodedInitialState = mkGameState hardcodedRoom (V2 5 5)
 
 -- | Apply an action to the game state. Pure; no IO.
 applyAction :: GameAction -> GameState -> GameState

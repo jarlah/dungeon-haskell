@@ -34,12 +34,14 @@ library
     Game.Types
     Game.GameState
     Game.Logic.Movement
+    Game.Logic.Dungeon
     Game.Render
     Game.Input
   build-depends:
     , linear
     , vector
     , containers
+    , random
     , brick
     , vty
     , vty-crossplatform
@@ -54,6 +56,7 @@ executable dungeon-haskell
     , vty
     , vty-crossplatform
     , mtl
+    , random
   ghc-options:         -threaded -rtsopts
 
 test-suite dungeon-haskell-test
@@ -63,12 +66,15 @@ test-suite dungeon-haskell-test
   main-is:             Spec.hs
   other-modules:
     Game.Logic.MovementSpec
+    Game.Logic.DungeonSpec
   build-depends:
     , dungeon-haskell
     , hspec
     , QuickCheck
     , linear
     , vector
+    , containers
+    , random
   build-tool-depends:
     hspec-discover:hspec-discover
   ghc-options:         -threaded -rtsopts

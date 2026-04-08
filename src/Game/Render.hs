@@ -1,7 +1,6 @@
 module Game.Render (drawGame) where
 
 import Brick
-import qualified Graphics.Vty as V
 import Linear (V2(..))
 
 import Game.GameState
@@ -10,24 +9,24 @@ import Game.Types
 drawGame :: GameState -> [Widget ()]
 drawGame gs =
   [ vBox
-      [ raw (gridImage gs)
-      , str " "
+      [ drawGrid gs
+      -- Park the terminal cursor on this blank spacer line. Some
+      -- terminals don't honor Vty's hide-cursor escape reliably, so
+      -- we explicitly pin it to a stable, visually quiet spot.
+      , showCursor () (Location (0, 0)) $ str " "
       , str "Move: arrows / hjkl / yubn   Wait: .   Quit: q / Esc"
       ]
   ]
 
--- | Build the whole dungeon grid as a single Vty 'Image'.
---
---   Going through a single pre-built 'V.Image' (instead of one tiny
---   'Widget' per cell) avoids layout weirdness and gives pixel-stable
---   output — exactly what we want for a fixed character grid.
-gridImage :: GameState -> V.Image
-gridImage gs =
-  let dl    = gsLevel gs
-      ppos  = gsPlayerPos gs
-      rowStr y = [ cellChar ppos (V2 x y) dl | x <- [0 .. dlWidth dl - 1] ]
-      rowImg y = V.string V.defAttr (rowStr y)
-  in V.vertCat [ rowImg y | y <- [0 .. dlHeight dl - 1] ]
+-- | Render the dungeon as one 'str' widget per row. This is the idiomatic
+--   Brick approach for fixed-character grids and lets Brick's diffing
+--   handle cell updates correctly across frames.
+drawGrid :: GameState -> Widget ()
+drawGrid gs =
+  let dl = gsLevel gs
+      p  = gsPlayerPos gs
+      rowStr y = [ cellChar p (V2 x y) dl | x <- [0 .. dlWidth dl - 1] ]
+  in vBox [ str (rowStr y) | y <- [0 .. dlHeight dl - 1] ]
 
 cellChar :: Pos -> Pos -> DungeonLevel -> Char
 cellChar playerPos pos dl
