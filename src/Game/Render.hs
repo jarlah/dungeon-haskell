@@ -1,12 +1,22 @@
-module Game.Render (drawGame) where
+module Game.Render
+  ( drawGame
+  , fogAttr
+  ) where
 
 import Brick
 import Data.List (find)
+import qualified Data.Set as Set
+import Data.Set (Set)
 import Linear (V2(..))
 
 import Game.GameState
 import Game.Logic.Progression (xpForNextLevel)
 import Game.Types
+
+-- | Attribute name used for "explored but not currently visible"
+--   tiles. Main wires this to a dim color in its 'attrMap'.
+fogAttr :: AttrName
+fogAttr = attrName "fog"
 
 drawGame :: GameState -> [Widget ()]
 drawGame gs =
@@ -22,29 +32,48 @@ drawGame gs =
       ]
   ]
 
--- | Render the dungeon as one 'str' widget per row.
+-- | Render the dungeon one row at a time. Each cell is classified
+--   into one of three states: visible (normal), explored-but-not-
+--   visible (dim fog), or unseen (blank).
 drawGrid :: GameState -> Widget ()
 drawGrid gs =
-  let dl       = gsLevel gs
-      p        = gsPlayerPos gs
-      monsters = gsMonsters gs
-      rowStr y = [ cellChar p monsters (V2 x y) dl
-                 | x <- [0 .. dlWidth dl - 1] ]
-  in vBox [ str (rowStr y) | y <- [0 .. dlHeight dl - 1] ]
+  let dl  = gsLevel gs
+      vis = gsVisible  gs
+      exp_ = gsExplored gs
+  in vBox
+       [ hBox
+           [ drawCell gs vis exp_ (V2 x y)
+           | x <- [0 .. dlWidth dl - 1] ]
+       | y <- [0 .. dlHeight dl - 1] ]
 
-cellChar :: Pos -> [Monster] -> Pos -> DungeonLevel -> Char
-cellChar playerPos monsters pos dl
-  | pos == playerPos = '@'
-  | otherwise = case find (\m -> mPos m == pos) monsters of
+drawCell :: GameState -> Set Pos -> Set Pos -> Pos -> Widget ()
+drawCell gs vis exp_ pos
+  | pos `Set.member` vis =
+      str [visibleGlyph gs pos]
+  | pos `Set.member` exp_ =
+      withAttr fogAttr $ str [tileGlyph (gsLevel gs) pos]
+  | otherwise =
+      str " "
+
+-- | Glyph for a visible tile: player > monster > terrain.
+visibleGlyph :: GameState -> Pos -> Char
+visibleGlyph gs pos
+  | pos == gsPlayerPos gs = '@'
+  | otherwise = case find (\m -> mPos m == pos) (gsMonsters gs) of
       Just m  -> monsterGlyph (mKind m)
-      Nothing -> case tileAt dl pos of
-        Just Floor         -> '.'
-        Just Wall          -> '#'
-        Just (Door Open)   -> '/'
-        Just (Door Closed) -> '+'
-        Just StairsDown    -> '>'
-        Just StairsUp      -> '<'
-        Nothing            -> ' '
+      Nothing -> tileGlyph (gsLevel gs) pos
+
+-- | Glyph for the terrain at a position, without the player or
+--   monsters overlaid. Used for both visible and fogged rendering.
+tileGlyph :: DungeonLevel -> Pos -> Char
+tileGlyph dl pos = case tileAt dl pos of
+  Just Floor         -> '.'
+  Just Wall          -> '#'
+  Just (Door Open)   -> '/'
+  Just (Door Closed) -> '+'
+  Just StairsDown    -> '>'
+  Just StairsUp      -> '<'
+  Nothing            -> ' '
 
 drawStatus :: GameState -> Widget ()
 drawStatus gs =

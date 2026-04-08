@@ -5,6 +5,7 @@
 --   with hand-picked RNG + stats so the combat outcome is forced.
 module Game.GameStateSpec (spec) where
 
+import qualified Data.Set as Set
 import qualified Data.Vector as V
 import Linear (V2(..))
 import System.Random (mkStdGen)
@@ -38,6 +39,8 @@ mkFixture seed ppos pstats monsters = GameState
   , gsDead        = False
   , gsQuitting    = False
   , gsEvents      = [EvAttackHit]  -- stale, should be cleared by applyAction
+  , gsVisible     = Set.empty       -- applyAction recomputes these
+  , gsExplored    = Set.empty
   }
 
 -- | Player stats strong enough to one-shot anything normal.

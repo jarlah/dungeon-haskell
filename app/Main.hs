@@ -11,7 +11,7 @@ import qualified Game.Audio as Audio
 import Game.GameState
 import Game.Input (handleKey)
 import Game.Logic.Dungeon (defaultLevelConfig)
-import Game.Render (drawGame)
+import Game.Render (drawGame, fogAttr)
 import Game.Types (GameAction(..))
 
 -- | Build the Brick 'App' with audio closed into the event handler.
@@ -22,7 +22,9 @@ mkApp mAudio = App
   , appChooseCursor = showFirstCursor
   , appHandleEvent  = handleEvent mAudio
   , appStartEvent   = pure ()
-  , appAttrMap      = const $ attrMap V.defAttr []
+  , appAttrMap      = const $ attrMap V.defAttr
+      [ (fogAttr, fg V.brightBlack)
+      ]
   }
 
 handleEvent :: Maybe Audio.AudioSystem -> BrickEvent () e -> EventM () GameState ()

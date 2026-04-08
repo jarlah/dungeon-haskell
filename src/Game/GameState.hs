@@ -6,8 +6,11 @@ module Game.GameState
   , hardcodedRoom
   , hardcodedInitialState
   , applyAction
+  , fovRadius
   ) where
 
+import qualified Data.Set as Set
+import Data.Set (Set)
 import qualified Data.Vector as V
 import Linear (V2(..))
 import System.Random (StdGen, mkStdGen, randomR)
@@ -16,6 +19,7 @@ import Game.Types
 import qualified Game.Logic.Combat as C
 import Game.Logic.Combat (Damage(..))
 import qualified Game.Logic.Dungeon as D
+import qualified Game.Logic.FOV as FOV
 import Game.Logic.MonsterAI (MonsterIntent(..), monsterIntent)
 import qualified Game.Logic.Movement as M
 import qualified Game.Logic.Progression as P
@@ -33,7 +37,19 @@ data GameState = GameState
   , gsEvents      :: ![GameEvent]
     -- ^ events emitted during the most recent 'applyAction' call,
     --   in chronological order. Cleared at the start of each action.
+  , gsVisible     :: !(Set Pos)
+    -- ^ tiles currently in the player's field of view, recomputed
+    --   at the end of every action.
+  , gsExplored    :: !(Set Pos)
+    -- ^ tiles the player has ever seen. Monotonically grows as the
+    --   player explores; used to render a dim "fog of war" for
+    --   tiles that are known but not currently visible.
   } deriving (Show)
+
+-- | How far the player can see, in tiles. Measured in Euclidean
+--   distance; 8 feels right for a 60×20 dungeon.
+fovRadius :: Int
+fovRadius = 8
 
 defaultPlayerStats :: Stats
 defaultPlayerStats = Stats
@@ -48,7 +64,7 @@ defaultPlayerStats = Stats
 
 -- | Construct a 'GameState' from the given parts.
 mkGameState :: StdGen -> DungeonLevel -> Pos -> [Monster] -> GameState
-mkGameState gen dl start monsters = GameState
+mkGameState gen dl start monsters = recomputeVisibility GameState
   { gsLevel       = dl
   , gsPlayerPos   = start
   , gsPlayerStats = defaultPlayerStats
@@ -58,7 +74,19 @@ mkGameState gen dl start monsters = GameState
   , gsDead        = False
   , gsQuitting    = False
   , gsEvents      = []
+  , gsVisible     = Set.empty
+  , gsExplored    = Set.empty
   }
+
+-- | Refresh 'gsVisible' from the player's current position and fold
+--   the new FOV into 'gsExplored'. Called once at the end of every
+--   action so the rendering layer always has up-to-date sets.
+recomputeVisibility :: GameState -> GameState
+recomputeVisibility gs =
+  let vis = FOV.computeFOV (gsLevel gs) (gsPlayerPos gs) fovRadius
+  in gs { gsVisible  = vis
+        , gsExplored = Set.union (gsExplored gs) vis
+        }
 
 -- | Create a fresh game: generate a level, spawn monsters, build state.
 newGame :: StdGen -> D.LevelConfig -> GameState
@@ -130,7 +158,7 @@ applyAction act gs0 =
   -- Each action starts with a fresh event log so consumers (audio)
   -- only see what happened on *this* turn.
   let gs = gs0 { gsEvents = [] }
-  in case act of
+  in recomputeVisibility $ case act of
        Quit                -> gs { gsQuitting = True }
        _ | gsDead gs       -> gs
        Wait                -> processMonsters gs
