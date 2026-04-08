@@ -22,6 +22,8 @@ import Game.Logic.Combat (Damage(..))
 import Game.Logic.Command (Command(..))
 import qualified Game.Logic.Dungeon as D
 import qualified Game.Logic.FOV as FOV
+import qualified Game.Logic.Inventory as Inv
+import qualified Game.Logic.Loot as Loot
 import Game.Logic.MonsterAI (MonsterIntent(..), monsterIntent)
 import qualified Game.Logic.Movement as M
 import qualified Game.Logic.Progression as P
@@ -51,6 +53,15 @@ data GameState = GameState
     --   closed and keystrokes drive the normal keymap; 'Just buf'
     --   means the prompt is open and keystrokes append to @buf@
     --   until 'Enter' submits or 'Esc' cancels.
+  , gsInventory   :: !Inventory
+    -- ^ what the player is carrying, plus equipped slots.
+  , gsItemsOnFloor :: ![(Pos, Item)]
+    -- ^ loot that has been dropped on the current level and not yet
+    --   picked up. Kept as a flat list (duplicates allowed) so
+    --   multiple items can pile on a single tile.
+  , gsInventoryOpen :: !Bool
+    -- ^ is the inventory modal currently open? Input routes through
+    --   the modal handler when true.
   } deriving (Show)
 
 -- | How far the player can see, in tiles. Measured in Euclidean
@@ -84,6 +95,9 @@ mkGameState gen dl start monsters = recomputeVisibility GameState
   , gsVisible     = Set.empty
   , gsExplored    = Set.empty
   , gsPrompt      = Nothing
+  , gsInventory   = emptyInventory
+  , gsItemsOnFloor = []
+  , gsInventoryOpen = False
   }
 
 -- | Refresh 'gsVisible' from the player's current position and fold
@@ -186,6 +200,8 @@ applyAction act gs0 =
        Quit                -> gs { gsQuitting = True }
        _ | gsDead gs       -> gs
        Wait                -> processMonsters gs
+       Pickup              -> processMonsters (playerPickup gs)
+       UseItem idx         -> processMonsters (playerUseItem idx gs)
        Move dir            ->
          let target = gsPlayerPos gs + dirToOffset dir
          in case monsterAt target (gsMonsters gs) of
@@ -225,7 +241,8 @@ monsterAt p = go 0
 
 playerAttack :: GameState -> Int -> Monster -> GameState
 playerAttack gs i m =
-  let (result, gen') = C.resolveAttack (gsRng gs) (gsPlayerStats gs) (mStats m)
+  let playerCombat   = Inv.effectiveStats (gsPlayerStats gs) (gsInventory gs)
+      (result, gen') = C.resolveAttack (gsRng gs) playerCombat (mStats m)
       newMStats      = C.applyDamage (mStats m) (Damage (C.resultDamage result))
       msg            = C.describeAttack result (monsterName (mKind m))
       killed         = C.isDead newMStats
@@ -248,14 +265,93 @@ playerAttack gs i m =
         if killed
           then removeAt i (gsMonsters gs)
           else updateAt i (\mo -> mo { mStats = newMStats }) (gsMonsters gs)
+      -- Roll loot drops at the monster's tile if the blow was fatal.
+      (loot, gen'') =
+        if killed
+          then Loot.rollLoot gen' (mKind m)
+          else ([], gen')
+      lootMsgs =
+        [ "The " ++ monsterName (mKind m) ++ " drops a " ++ itemName it ++ "."
+        | it <- loot
+        ]
+      itemsOnFloor' =
+        gsItemsOnFloor gs ++ [ (mPos m, it) | it <- loot ]
   in emit
        gs
-         { gsMonsters    = monsters'
-         , gsPlayerStats = playerStats'
-         , gsRng         = gen'
-         , gsMessages    = levelMsgs ++ [msg] ++ gsMessages gs
+         { gsMonsters     = monsters'
+         , gsPlayerStats  = playerStats'
+         , gsRng          = gen''
+         , gsMessages     = reverse lootMsgs ++ levelMsgs ++ [msg] ++ gsMessages gs
+         , gsItemsOnFloor = itemsOnFloor'
          }
        (combatEv : levelEvs)
+
+------------------------------------------------------------
+-- Items
+------------------------------------------------------------
+
+-- | Pick up the first item on the player's current tile. Costs a
+--   turn even if there is nothing to pick up (matching the
+--   standard roguelike convention — the attempt still took time).
+playerPickup :: GameState -> GameState
+playerPickup gs =
+  case takeFirstItemAt (gsPlayerPos gs) (gsItemsOnFloor gs) of
+    Nothing ->
+      gs { gsMessages = "Nothing to pick up." : gsMessages gs }
+    Just (item, rest) ->
+      case Inv.addItem item (gsInventory gs) of
+        Left InventoryFull ->
+          gs { gsMessages =
+                 ("Your pack is full — you can't pick up the " ++ itemName item ++ ".")
+                 : gsMessages gs
+             }
+        Right inv' ->
+          gs { gsInventory    = inv'
+             , gsItemsOnFloor = rest
+             , gsMessages     = ("You pick up the " ++ itemName item ++ ".") : gsMessages gs
+             }
+
+-- | Find and remove the first item at @p@ from the floor list,
+--   preserving the order of the rest.
+takeFirstItemAt :: Pos -> [(Pos, Item)] -> Maybe (Item, [(Pos, Item)])
+takeFirstItemAt p = go []
+  where
+    go _    []                        = Nothing
+    go seen ((q, it) : rest)
+      | q == p    = Just (it, reverse seen ++ rest)
+      | otherwise = go ((q, it) : seen) rest
+
+-- | Apply the default action to the item at @idx@ in the bag.
+--   Potions are quaffed (and consumed); weapons and armor are
+--   equipped (swapping with the previously-equipped piece, which
+--   goes back to the bag).
+playerUseItem :: Int -> GameState -> GameState
+playerUseItem idx gs =
+  case lookupBag idx (gsInventory gs) of
+    Nothing -> gs { gsMessages = "No such item." : gsMessages gs }
+    Just item -> case item of
+      IPotion p ->
+        let inv'    = Inv.dropItem idx (gsInventory gs)
+            stats'  = Inv.quaffPotion p (gsPlayerStats gs)
+            healed  = sHP stats' - sHP (gsPlayerStats gs)
+            msg     = "You quaff the " ++ itemName item
+                   ++ " and heal " ++ show healed ++ " HP."
+        in gs { gsInventory   = inv'
+              , gsPlayerStats = stats'
+              , gsMessages    = msg : gsMessages gs
+              }
+      IWeapon _ ->
+        let inv' = Inv.equip idx (gsInventory gs)
+            msg  = "You equip the " ++ itemName item ++ "."
+        in gs { gsInventory = inv', gsMessages = msg : gsMessages gs }
+      IArmor _ ->
+        let inv' = Inv.equip idx (gsInventory gs)
+            msg  = "You don the " ++ itemName item ++ "."
+        in gs { gsInventory = inv', gsMessages = msg : gsMessages gs }
+  where
+    lookupBag i inv
+      | i < 0 || i >= length (invItems inv) = Nothing
+      | otherwise                           = Just (invItems inv !! i)
 
 ------------------------------------------------------------
 -- Monster turns
@@ -287,7 +383,8 @@ processMonster gs i m =
 
 monsterAttack :: GameState -> Monster -> GameState
 monsterAttack gs m =
-  let (result, gen')  = C.resolveAttack (gsRng gs) (mStats m) (gsPlayerStats gs)
+  let playerDefense   = Inv.effectiveStats (gsPlayerStats gs) (gsInventory gs)
+      (result, gen')  = C.resolveAttack (gsRng gs) (mStats m) playerDefense
       newPlayerStats  = C.applyDamage (gsPlayerStats gs) (Damage (C.resultDamage result))
       msg             = C.describeAttacked result (monsterName (mKind m))
       died            = C.isDead newPlayerStats

@@ -15,6 +15,15 @@ module Game.Types
   , monsterName
   , Monster(..)
   , GameEvent(..)
+  , Potion(..)
+  , Weapon(..)
+  , Armor(..)
+  , Item(..)
+  , itemGlyph
+  , itemName
+  , Inventory(..)
+  , emptyInventory
+  , InventoryError(..)
   ) where
 
 import Data.Vector (Vector, (!))
@@ -69,6 +78,11 @@ isWalkable (Door Closed) = False
 data GameAction
   = Move Dir
   | Wait
+  | Pickup
+    -- ^ pick up whatever item is on the player's current tile
+  | UseItem !Int
+    -- ^ apply the default action (quaff / equip) to the item at
+    --   the given index in 'invItems'
   | Quit
   deriving (Eq, Show)
 
@@ -138,4 +152,74 @@ data GameEvent
   | EvPlayerHurt     -- ^ a monster hit the player
   | EvPlayerDied     -- ^ a monster dealt the killing blow
   | EvLevelUp        -- ^ player gained an experience level
+  deriving (Eq, Show)
+
+------------------------------------------------------------
+-- Items and inventory (M5)
+------------------------------------------------------------
+
+-- | Consumable healing potions.
+data Potion
+  = HealingMinor
+  | HealingMajor
+  deriving (Eq, Show, Enum, Bounded)
+
+-- | Equippable melee weapons.
+data Weapon
+  = ShortSword
+  | LongSword
+  deriving (Eq, Show, Enum, Bounded)
+
+-- | Equippable body armor.
+data Armor
+  = LeatherArmor
+  | ChainMail
+  deriving (Eq, Show, Enum, Bounded)
+
+-- | An item that can appear on the floor or in a player's inventory.
+data Item
+  = IPotion !Potion
+  | IWeapon !Weapon
+  | IArmor  !Armor
+  deriving (Eq, Show)
+
+-- | ASCII glyph used to render an item on the dungeon floor or in
+--   the inventory screen. Follows the rogue/NetHack convention:
+--   @!@ potions, @)@ weapons, @[@ armor.
+itemGlyph :: Item -> Char
+itemGlyph (IPotion _) = '!'
+itemGlyph (IWeapon _) = ')'
+itemGlyph (IArmor  _) = '['
+
+-- | Human-readable name for message log / inventory listing.
+itemName :: Item -> String
+itemName (IPotion HealingMinor) = "minor healing potion"
+itemName (IPotion HealingMajor) = "major healing potion"
+itemName (IWeapon ShortSword)   = "short sword"
+itemName (IWeapon LongSword)    = "long sword"
+itemName (IArmor  LeatherArmor) = "leather armor"
+itemName (IArmor  ChainMail)    = "chain mail"
+
+-- | What the player is carrying. 'invItems' holds unequipped items
+--   in pickup order; 'invWeapon' / 'invArmor' are the currently
+--   equipped slots. Equipping swaps the held piece for whatever is
+--   currently equipped (the previous piece goes back into
+--   'invItems'), so equip is never destructive.
+data Inventory = Inventory
+  { invItems  :: ![Item]
+  , invWeapon :: !(Maybe Weapon)
+  , invArmor  :: !(Maybe Armor)
+  } deriving (Eq, Show)
+
+-- | An empty inventory with nothing equipped.
+emptyInventory :: Inventory
+emptyInventory = Inventory
+  { invItems  = []
+  , invWeapon = Nothing
+  , invArmor  = Nothing
+  }
+
+-- | Errors that can arise from inventory operations.
+data InventoryError
+  = InventoryFull
   deriving (Eq, Show)

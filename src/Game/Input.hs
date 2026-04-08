@@ -20,6 +20,7 @@ handleKey key _mods = case key of
   V.KChar 'b' -> Just (Move SW)
   V.KChar 'n' -> Just (Move SE)
   V.KChar '.' -> Just Wait
+  V.KChar 'g' -> Just Pickup
   V.KChar 'q' -> Just Quit
   V.KEsc      -> Just Quit
   _           -> Nothing
