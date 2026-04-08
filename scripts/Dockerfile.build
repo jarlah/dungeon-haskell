@@ -1,0 +1,30 @@
+# Build environment for dungeon-haskell release binaries.
+#
+# Using the official `haskell:9.10.3` image (Debian Bookworm base)
+# gives us a glibc-linked toolchain — critical because the dev host
+# is NixOS, and a binary produced there ships with /nix/store paths
+# baked into its interpreter, making it unusable on any other
+# system. This image produces a binary linked against standard
+# Debian Bookworm glibc (2.36), which runs unmodified on any
+# reasonably modern Linux distro.
+#
+# The base image already has GHC 9.10.3 + cabal + stack, so the only
+# thing we add is the native SDL2 / pkg-config toolchain that
+# proteaaudio-sdl needs to link against.
+FROM haskell:9.10.3-slim-bookworm
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      libsdl2-dev \
+      pkg-config \
+      zlib1g-dev \
+      xz-utils \
+      ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+# Stack inside the container should use the container's own GHC and
+# must not try to enable the Nix integration that the repo's
+# stack.yaml turns on for the NixOS dev shell.
+ENV STACK_ARGS="--system-ghc --no-nix"
+
+WORKDIR /workspace
