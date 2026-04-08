@@ -7,7 +7,7 @@ import System.Random (newStdGen)
 
 import Game.GameState
 import Game.Input (handleKey)
-import Game.Logic.Dungeon (defaultLevelConfig, generateLevel)
+import Game.Logic.Dungeon (defaultLevelConfig)
 import Game.Render (drawGame)
 import Game.Types (GameAction(..))
 
@@ -31,9 +31,8 @@ handleEvent _ = pure ()
 main :: IO ()
 main = do
   gen <- newStdGen
-  let (dl, startPos, _) = generateLevel gen defaultLevelConfig
-      initialState      = mkGameState dl startPos
-      buildVty          = VCP.mkVty V.defaultConfig
+  let initialState = newGame gen defaultLevelConfig
+      buildVty     = VCP.mkVty V.defaultConfig
   initialVty <- buildVty
   _ <- customMain initialVty buildVty Nothing app initialState
   pure ()

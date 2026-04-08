@@ -35,6 +35,8 @@ library
     Game.GameState
     Game.Logic.Movement
     Game.Logic.Dungeon
+    Game.Logic.Combat
+    Game.Logic.MonsterAI
     Game.Render
     Game.Input
   build-depends:
@@ -67,6 +69,7 @@ test-suite dungeon-haskell-test
   other-modules:
     Game.Logic.MovementSpec
     Game.Logic.DungeonSpec
+    Game.Logic.CombatSpec
   build-depends:
     , dungeon-haskell
     , hspec

@@ -16,9 +16,8 @@ import Game.Types
 --   properties fully reproducible under QuickCheck shrinking.
 levelFor :: Int -> (DungeonLevel, Pos, [Room])
 levelFor seed =
-  let gen            = mkStdGen seed
-      (dl, start, _) = generateLevel gen defaultLevelConfig
-      (rooms,    _)  = placeRooms    defaultLevelConfig gen
+  let gen                    = mkStdGen seed
+      (dl, start, rooms, _)  = generateLevel gen defaultLevelConfig
   in (dl, start, rooms)
 
 -- | 4-connected flood fill over walkable tiles starting from a point.

@@ -8,6 +8,12 @@ module Game.Types
   , tileAt
   , isWalkable
   , GameAction(..)
+  , Stats(..)
+  , MonsterKind(..)
+  , monsterStats
+  , monsterGlyph
+  , monsterName
+  , Monster(..)
   ) where
 
 import Data.Vector (Vector, (!))
@@ -64,3 +70,37 @@ data GameAction
   | Wait
   | Quit
   deriving (Eq, Show)
+
+-- | Combat / survival stats, shared by player and monsters.
+data Stats = Stats
+  { sHP      :: !Int
+  , sMaxHP   :: !Int
+  , sAttack  :: !Int
+  , sDefense :: !Int
+  , sSpeed   :: !Int
+  } deriving (Eq, Show)
+
+data MonsterKind = Rat | Goblin | Orc
+  deriving (Eq, Show, Enum, Bounded)
+
+-- | Baseline stats for a monster of the given kind.
+monsterStats :: MonsterKind -> Stats
+monsterStats Rat    = Stats  5  5 2 0 3
+monsterStats Goblin = Stats 10 10 4 1 4
+monsterStats Orc    = Stats 18 18 6 3 5
+
+monsterGlyph :: MonsterKind -> Char
+monsterGlyph Rat    = 'r'
+monsterGlyph Goblin = 'g'
+monsterGlyph Orc    = 'o'
+
+monsterName :: MonsterKind -> String
+monsterName Rat    = "rat"
+monsterName Goblin = "goblin"
+monsterName Orc    = "orc"
+
+data Monster = Monster
+  { mKind  :: !MonsterKind
+  , mPos   :: !Pos
+  , mStats :: !Stats
+  } deriving (Eq, Show)

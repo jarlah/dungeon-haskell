@@ -104,8 +104,10 @@ carveCorridors gen0 (r1:r2:rs) =
   in (seg ++ rest, gen2)
 
 -- | Generate a random dungeon level. Returns the level, the player start
---   position (on StairsUp), and the advanced 'StdGen'.
-generateLevel :: StdGen -> LevelConfig -> (DungeonLevel, Pos, StdGen)
+--   position (on StairsUp), the list of rooms placed, and the advanced
+--   'StdGen'. The room list is returned so callers can use it for
+--   monster / loot placement without re-running 'placeRooms'.
+generateLevel :: StdGen -> LevelConfig -> (DungeonLevel, Pos, [Room], StdGen)
 generateLevel gen0 cfg =
   let (rooms,     gen1) = placeRooms     cfg gen0
       (corridors, gen2) = carveCorridors gen1 rooms
@@ -136,7 +138,7 @@ generateLevel gen0 cfg =
         , dlDepth  = lcDepth cfg
         , dlTiles  = tiles
         }
-  in (dl, stairsUpPos, gen2)
+  in (dl, stairsUpPos, rooms, gen2)
 
 posToIdx :: Int -> Pos -> Int
 posToIdx w (V2 x y) = y * w + x
