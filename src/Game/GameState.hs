@@ -10,6 +10,7 @@ module Game.GameState
   , applyAction
   , applyCommand
   , acceptQuestFromNPC
+  , abandonQuest
   , fovRadius
   ) where
 
@@ -89,6 +90,19 @@ data GameState = GameState
     --   talking to, or 'Nothing' when no dialogue is open. When
     --   this is 'Just', input routes through the dialogue handler
     --   and monsters do not act.
+  , gsQuestLogOpen :: !Bool
+    -- ^ is the quest log modal currently open?
+  , gsQuestLogCursor :: !(Maybe Int)
+    -- ^ index into the *active* quests in 'gsQuests' that the
+    --   player has selected in the quest log, or 'Nothing' if no
+    --   selection. Only meaningful when 'gsQuestLogOpen' is
+    --   'True'. A selection exists so that pressing a letter
+    --   (select) followed by @x@ (abandon) reads as a built-in
+    --   two-step confirm.
+  , gsConfirmQuit :: !Bool
+    -- ^ is the quit-confirmation modal currently open? Set when
+    --   the player presses @q@ / @Esc@ in normal mode so a
+    --   fat-fingered quit key doesn't immediately end the run.
   , gsLevels      :: !(Map Int ParkedLevel)
     -- ^ previously-visited dungeon levels, keyed by their depth.
     --   The *current* level is always in 'gsLevel' and friends —
@@ -166,6 +180,9 @@ mkGameState gen dl start monsters = recomputeVisibility GameState
   , gsQuests      = []
   , gsNPCs        = []
   , gsDialogue    = Nothing
+  , gsQuestLogOpen   = False
+  , gsQuestLogCursor = Nothing
+  , gsConfirmQuit    = False
   , gsLevels      = Map.empty
   }
 
@@ -513,6 +530,27 @@ npcAt p = go 0
 --   new happened combat-wise).
 playerTalk :: Int -> GameState -> GameState
 playerTalk i gs = gs { gsDialogue = Just i }
+
+-- | Abandon the currently-active quest at the given index into
+--   the *active-only* sub-list of 'gsQuests'. Flipping it to
+--   'QuestFailed' is enough — 'advanceQuest' already treats
+--   failed as absorbing, so the quest stays visible in the log
+--   but never progresses again. Out-of-range indices are no-ops.
+--   Clears 'gsQuestLogCursor' after the flip so the log doesn't
+--   keep pointing at a now-invalid position.
+abandonQuest :: Int -> GameState -> GameState
+abandonQuest activeIdx gs =
+  let active   = [ (i, q) | (i, q) <- zip [0 ..] (gsQuests gs)
+                          , qStatus q == QuestActive ]
+  in case drop activeIdx active of
+       []              -> gs
+       ((realIdx, q) : _) ->
+         let failed = q { qStatus = QuestFailed }
+             msg    = "You abandon \"" ++ qName q ++ "\"."
+         in gs { gsQuests         = updateAt realIdx (const failed) (gsQuests gs)
+               , gsQuestLogCursor = Nothing
+               , gsMessages       = msg : gsMessages gs
+               }
 
 -- | Accept the quest at the given offer index from the NPC at the
 --   given NPC index. Moves the quest from the NPC's offer list

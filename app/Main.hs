@@ -14,6 +14,7 @@ import Game.GameState
 import Game.Input (handleKey)
 import Game.Logic.Command (parseCommand)
 import Game.Logic.Dungeon (defaultLevelConfig)
+import Game.Logic.Quest (Quest(..), QuestStatus(..))
 import Game.Render (drawGame, fogAttr, npcAttr)
 import Game.Types (GameAction(..), Inventory(..))
 
@@ -35,11 +36,47 @@ handleEvent :: Maybe Audio.AudioSystem -> BrickEvent () e -> EventM () GameState
 handleEvent mAudio (VtyEvent (V.EvKey key mods)) = do
   gs <- get
   case () of
-    _ | Just buf <- gsPrompt gs     -> handlePromptKey key buf
+    _ | gsConfirmQuit gs            -> handleConfirmQuitKey key
+      | Just buf <- gsPrompt gs     -> handlePromptKey key buf
       | Just i   <- gsDialogue gs   -> handleDialogueKey i key
+      | gsQuestLogOpen gs           -> handleQuestLogKey key
       | gsInventoryOpen gs          -> handleInventoryKey mAudio key
       | otherwise                   -> handleNormalKey mAudio key mods
 handleEvent _ _ = pure ()
+
+-- | Keystrokes while the quit-confirmation modal is open.
+--   @y@ actually halts the app; @n@, @Esc@, or anything else
+--   closes the modal and returns to the game.
+handleConfirmQuitKey :: V.Key -> EventM () GameState ()
+handleConfirmQuitKey (V.KChar 'y') = halt
+handleConfirmQuitKey (V.KChar 'Y') = halt
+handleConfirmQuitKey _ =
+  modify (\gs -> gs { gsConfirmQuit = False })
+
+-- | Keystrokes while the quest log modal is open. Letters @a@..@z@
+--   select the active quest at that index (the selection is shown
+--   as an asterisk in the log); pressing @x@ while a selection is
+--   in place abandons that quest (flipping it to QuestFailed).
+--   Two keystrokes = built-in confirm. Esc or @j@ closes.
+handleQuestLogKey :: V.Key -> EventM () GameState ()
+handleQuestLogKey V.KEsc =
+  modify (\gs -> gs { gsQuestLogOpen = False, gsQuestLogCursor = Nothing })
+handleQuestLogKey (V.KChar 'Q') =
+  modify (\gs -> gs { gsQuestLogOpen = False, gsQuestLogCursor = Nothing })
+handleQuestLogKey (V.KChar 'x') = do
+  gs <- get
+  case gsQuestLogCursor gs of
+    Just idx -> modify (abandonQuest idx)
+    Nothing  -> pure ()
+handleQuestLogKey (V.KChar c)
+  | c >= 'a' && c <= 'z' = do
+      gs <- get
+      let idx    = ord c - ord 'a'
+          active = [ q | q <- gsQuests gs, qStatus q == QuestActive ]
+      if idx < length active
+        then modify (\s -> s { gsQuestLogCursor = Just idx })
+        else pure ()
+handleQuestLogKey _ = pure ()
 
 -- | Keystrokes while an NPC dialogue modal is open. Letters
 --   @a@..@z@ accept the offer at that index; 'Esc' closes the
@@ -125,9 +162,15 @@ handleNormalKey _ (V.KChar '/') _ =
   modify (\gs -> gs { gsPrompt = Just "" })
 handleNormalKey _ (V.KChar 'i') _ =
   modify (\gs -> gs { gsInventoryOpen = True })
+handleNormalKey _ (V.KChar 'Q') _ =
+  modify (\gs -> gs { gsQuestLogOpen = True, gsQuestLogCursor = Nothing })
 handleNormalKey mAudio key mods =
   case handleKey key mods of
-    Just Quit -> halt
+    Just Quit ->
+      -- Don't halt immediately — open a confirm modal. q and Q
+      -- are one shift-key apart, so fat-fingering Quest Log
+      -- would otherwise kill the run.
+      modify (\gs -> gs { gsConfirmQuit = True })
     Just act  -> do
       modify (applyAction act)
       playEventsFor mAudio

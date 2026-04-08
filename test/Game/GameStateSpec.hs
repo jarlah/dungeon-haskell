@@ -50,6 +50,9 @@ mkFixture seed ppos pstats monsters = GameState
   , gsQuests        = []
   , gsNPCs          = []
   , gsDialogue      = Nothing
+  , gsQuestLogOpen   = False
+  , gsQuestLogCursor = Nothing
+  , gsConfirmQuit    = False
   , gsLevels        = mempty
   }
 
@@ -164,6 +167,48 @@ spec = describe "Game.GameState.applyAction / event emission" $ do
         gs2         = applyAction (Move N) gs1     -- kill the rat
     length (gsQuests gs2) `shouldBe` 1
     qStatus (head (gsQuests gs2)) `shouldBe` QuestCompleted
+
+  -- ----------------------------------------------------------------
+  -- M10.2: quest log / abandon
+  -- ----------------------------------------------------------------
+
+  it "abandonQuest flips the selected active quest to QuestFailed" $ do
+    let slayer = mkQuest "Slayer" (GoalKillMonsters 5)
+        delve  = mkQuest "Delve"  (GoalReachDepth 3)
+        gs     = (mkFixture 1 (V2 2 2) overpoweredPlayer [])
+                   { gsQuests = [slayer, delve] }
+        gs'    = abandonQuest 0 gs  -- abandon Slayer
+    map qStatus (gsQuests gs') `shouldBe` [QuestFailed, QuestActive]
+
+  it "abandonQuest is a no-op on an out-of-range index" $ do
+    let slayer = mkQuest "Slayer" (GoalKillMonsters 5)
+        gs     = (mkFixture 1 (V2 2 2) overpoweredPlayer [])
+                   { gsQuests = [slayer] }
+        gs'    = abandonQuest 5 gs
+    gsQuests gs' `shouldBe` gsQuests gs
+
+  it "abandonQuest skips past non-active quests when indexing" $ do
+    -- A mixed bag: completed, active, active. Abandoning index 1
+    -- of the *active* sub-list should target the THIRD underlying
+    -- quest (not the first active, which is index 0).
+    let done   = (mkQuest "Done"  (GoalKillMonsters 1)) { qStatus = QuestCompleted }
+        a1     = mkQuest "A1" (GoalKillMonsters 2)
+        a2     = mkQuest "A2" (GoalKillMonsters 3)
+        gs     = (mkFixture 1 (V2 2 2) overpoweredPlayer [])
+                   { gsQuests = [done, a1, a2] }
+        gs'    = abandonQuest 1 gs
+    map qStatus (gsQuests gs')
+      `shouldBe` [QuestCompleted, QuestActive, QuestFailed]
+
+  it "abandoning a quest clears the quest log cursor" $ do
+    let q  = mkQuest "T" (GoalKillMonsters 1)
+        gs = (mkFixture 1 (V2 2 2) overpoweredPlayer [])
+               { gsQuests         = [q]
+               , gsQuestLogOpen   = True
+               , gsQuestLogCursor = Just 0
+               }
+        gs' = abandonQuest 0 gs
+    gsQuestLogCursor gs' `shouldBe` Nothing
 
 -- | Build a test NPC with two starter offers, placed at the
 --   given position.

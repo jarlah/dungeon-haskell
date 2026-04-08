@@ -15,7 +15,8 @@ import Linear (V2(..))
 import Game.GameState
 import qualified Game.Logic.Inventory as Inv
 import Game.Logic.Progression (xpForNextLevel)
-import Game.Logic.Quest (Quest(..), questDescription, questProgressLabel)
+import Game.Logic.Quest
+  ( Quest(..), QuestStatus(..), questDescription, questProgressLabel )
 import Game.Types
 
 -- | Attribute name used for "explored but not currently visible"
@@ -37,12 +38,14 @@ drawGame gs =
         , drawStatus gs
         , drawQuests gs
         , drawMessages gs
-        , str "Move: arrows / hjkl / yubn   Wait: .   Get: g   Inv: i   Cmd: /   Quit: q / Esc"
+        , str "Move: arrows/hjkl/yubn  Wait: .  Get: g  Inv: i  Quests: Q  Cmd: /  Quit: q/Esc"
         ]
   in case gsDialogue gs of
        Just i | Just npc <- nthMaybe i (gsNPCs gs) ->
          [drawDialogueModal npc, baseLayer]
        _
+         | gsConfirmQuit  gs  -> [drawQuitConfirmModal, baseLayer]
+         | gsQuestLogOpen gs  -> [drawQuestLogModal gs, baseLayer]
          | gsInventoryOpen gs -> [drawInventoryModal gs, baseLayer]
          | otherwise          -> [baseLayer]
   where
@@ -196,3 +199,63 @@ drawDialogueModal npc =
       body = vBox $ map str (header ++ offerLines ++ footer)
       label = " " ++ npcName npc ++ " "
   in centerLayer $ borderWithLabel (str label) $ padAll 1 body
+
+-- | Full quest journal. Shows Active, Completed, and Failed
+--   sections. Active quests are labeled @a@..@z@; pressing a
+--   letter selects a quest, pressing @x@ while selected marks it
+--   abandoned (two keystrokes serve as a built-in confirm). The
+--   selected quest's letter is decorated with an asterisk so the
+--   player can see what they're about to abandon.
+drawQuestLogModal :: GameState -> Widget ()
+drawQuestLogModal gs =
+  let qs         = gsQuests gs
+      active     = [ q | q <- qs, qStatus q == QuestActive ]
+      completed  = [ q | q <- qs, qStatus q == QuestCompleted ]
+      failed     = [ q | q <- qs, qStatus q == QuestFailed ]
+      cursor     = gsQuestLogCursor gs
+
+      section title items fmt =
+        let rows = case items of
+              [] -> ["  (none)"]
+              xs -> map fmt (zip [(0 :: Int) ..] xs)
+        in (title ++ ":") : rows
+
+      activeLine (idx, q) =
+        let letter     = toEnum (fromEnum 'a' + idx) :: Char
+            marker     = case cursor of
+              Just c | c == idx -> '*'
+              _                 -> ' '
+            progress   = questProgressLabel q
+        in "  " ++ [marker] ++ [letter] ++ ") "
+             ++ qName q ++ "  [" ++ progress ++ "]  —  "
+             ++ questDescription q
+
+      doneLine (_, q) =
+        "  - " ++ qName q ++ "  —  " ++ questDescription q
+
+      lines_ =
+        section "Active"    active    activeLine
+        ++ [""]
+        ++ section "Completed" completed doneLine
+        ++ [""]
+        ++ section "Failed"    failed    doneLine
+        ++ [""]
+        ++ [ "[letter] select   x abandon selected   Esc close" ]
+
+      body = vBox (map str lines_)
+  in centerLayer $ borderWithLabel (str " Quest Log ") $ padAll 1 body
+
+-- | A tiny confirmation modal shown when the player presses @q@
+--   or @Esc@ in normal mode. Prevents fat-fingered quits given
+--   that @q@ (Quit) and @Q@ (Quest Log) are one shift-key apart.
+drawQuitConfirmModal :: Widget ()
+drawQuitConfirmModal =
+  centerLayer
+    $ borderWithLabel (str " Quit? ")
+    $ padAll 1
+    $ vBox
+        [ str "Really quit this run?"
+        , str ""
+        , str "  y : yes, quit"
+        , str "  n / Esc : keep playing"
+        ]
