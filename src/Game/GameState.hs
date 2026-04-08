@@ -1,5 +1,6 @@
 module Game.GameState
   ( GameState(..)
+  , ParkedLevel(..)
   , mkGameState
   , newGame
   , defaultPlayerStats
@@ -10,6 +11,8 @@ module Game.GameState
   , fovRadius
   ) where
 
+import qualified Data.Map.Strict as Map
+import Data.Map.Strict (Map)
 import qualified Data.Set as Set
 import Data.Set (Set)
 import qualified Data.Vector as V
@@ -27,6 +30,10 @@ import qualified Game.Logic.Loot as Loot
 import Game.Logic.MonsterAI (MonsterIntent(..), monsterIntent)
 import qualified Game.Logic.Movement as M
 import qualified Game.Logic.Progression as P
+import Game.Logic.Quest
+  ( Quest(..), QuestEvent(..), QuestGoal(..)
+  , advanceAll, isCompleted, mkQuest
+  )
 
 -- | Pure snapshot of the whole game world.
 data GameState = GameState
@@ -62,6 +69,32 @@ data GameState = GameState
   , gsInventoryOpen :: !Bool
     -- ^ is the inventory modal currently open? Input routes through
     --   the modal handler when true.
+  , gsQuests      :: ![Quest]
+    -- ^ active quests. The list is small (2–3 in the MVP) and we
+    --   advance every quest with every event, so a flat list is
+    --   fine. Completed/Failed quests stay in the list so the quest
+    --   panel can show their final state; 'advanceQuest' treats
+    --   terminal statuses as absorbing.
+  , gsLevels      :: !(Map Int ParkedLevel)
+    -- ^ previously-visited dungeon levels, keyed by their depth.
+    --   The *current* level is always in 'gsLevel' and friends —
+    --   parked entries only exist for floors the player has left
+    --   but may return to. Each parked level remembers its
+    --   monsters, items, explored set, and the position the player
+    --   was standing on when they left, so going back up returns
+    --   them to exactly where they descended from.
+  } deriving (Show)
+
+-- | State of a dungeon level the player is not currently standing
+--   on. Preserves everything that should survive a round-trip
+--   through the stairs: map layout, unkilled monsters, unlooted
+--   items, explored tiles, and where the player last stood.
+data ParkedLevel = ParkedLevel
+  { plLevel     :: !DungeonLevel
+  , plMonsters  :: ![Monster]
+  , plItems     :: ![(Pos, Item)]
+  , plExplored  :: !(Set Pos)
+  , plPlayerPos :: !Pos
   } deriving (Show)
 
 -- | How far the player can see, in tiles. Measured in Euclidean
@@ -98,7 +131,19 @@ mkGameState gen dl start monsters = recomputeVisibility GameState
   , gsInventory   = emptyInventory
   , gsItemsOnFloor = []
   , gsInventoryOpen = False
+  , gsQuests      = starterQuests
+  , gsLevels      = Map.empty
   }
+
+-- | The MVP quest set handed out at the start of every new run.
+--   Two tiny goals that cover the two event kinds the quest engine
+--   understands, so the player sees progress from both kills and
+--   stair descents.
+starterQuests :: [Quest]
+starterQuests =
+  [ mkQuest "Slayer" (GoalKillMonsters 5)
+  , mkQuest "Delve"  (GoalReachDepth 3)
+  ]
 
 -- | Refresh 'gsVisible' from the player's current position and fold
 --   the new FOV into 'gsExplored'. Called once at the end of every
@@ -202,6 +247,8 @@ applyAction act gs0 =
        Wait                -> processMonsters gs
        Pickup              -> processMonsters (playerPickup gs)
        UseItem idx         -> processMonsters (playerUseItem idx gs)
+       GoDownStairs        -> processMonsters (playerDescend gs)
+       GoUpStairs          -> processMonsters (playerAscend gs)
        Move dir            ->
          let target = gsPlayerPos gs + dirToOffset dir
          in case monsterAt target (gsMonsters gs) of
@@ -214,6 +261,28 @@ applyAction act gs0 =
 -- | Append events to the running per-turn log.
 emit :: GameState -> [GameEvent] -> GameState
 emit gs evs = gs { gsEvents = gsEvents gs ++ evs }
+
+-- | Run a 'QuestEvent' through every quest in 'gsQuests' and surface
+--   a "Quest complete: NAME!" message for any quest that flips from
+--   non-completed to completed as a result. Returns the updated
+--   state with the new quest list and any completion messages
+--   prepended to 'gsMessages'.
+fireQuestEvent :: QuestEvent -> GameState -> GameState
+fireQuestEvent ev gs =
+  let before      = gsQuests gs
+      after       = advanceAll ev before
+      -- Pair old and new by position; a quest "just completed" if
+      -- it wasn't completed before and is now.
+      newlyDone   =
+        [ qName q'
+        | (q, q') <- zip before after
+        , not (isCompleted q)
+        , isCompleted q'
+        ]
+      msgs = [ "Quest complete: " ++ n ++ "!" | n <- newlyDone ]
+  in gs { gsQuests   = after
+        , gsMessages = reverse msgs ++ gsMessages gs
+        }
 
 -- | Map a combat result to the event the *attacker* cares about
 --   when the attacker is the player.
@@ -276,15 +345,16 @@ playerAttack gs i m =
         ]
       itemsOnFloor' =
         gsItemsOnFloor gs ++ [ (mPos m, it) | it <- loot ]
-  in emit
-       gs
-         { gsMonsters     = monsters'
-         , gsPlayerStats  = playerStats'
-         , gsRng          = gen''
-         , gsMessages     = reverse lootMsgs ++ levelMsgs ++ [msg] ++ gsMessages gs
-         , gsItemsOnFloor = itemsOnFloor'
-         }
-       (combatEv : levelEvs)
+      gs' = emit
+        gs
+          { gsMonsters     = monsters'
+          , gsPlayerStats  = playerStats'
+          , gsRng          = gen''
+          , gsMessages     = reverse lootMsgs ++ levelMsgs ++ [msg] ++ gsMessages gs
+          , gsItemsOnFloor = itemsOnFloor'
+          }
+        (combatEv : levelEvs)
+  in if killed then fireQuestEvent EvKilledMonster gs' else gs'
 
 ------------------------------------------------------------
 -- Items
@@ -352,6 +422,99 @@ playerUseItem idx gs =
     lookupBag i inv
       | i < 0 || i >= length (invItems inv) = Nothing
       | otherwise                           = Just (invItems inv !! i)
+
+------------------------------------------------------------
+-- Stairs and level transitions
+------------------------------------------------------------
+
+-- | Park the current level state so it can be restored later.
+parkCurrent :: GameState -> ParkedLevel
+parkCurrent gs = ParkedLevel
+  { plLevel     = gsLevel gs
+  , plMonsters  = gsMonsters gs
+  , plItems     = gsItemsOnFloor gs
+  , plExplored  = gsExplored gs
+  , plPlayerPos = gsPlayerPos gs
+  }
+
+-- | Swap a 'ParkedLevel' in as the current level. The caller is
+--   responsible for removing it from 'gsLevels' if appropriate
+--   (so we don't leave a stale parked copy lying around).
+loadParked :: ParkedLevel -> GameState -> GameState
+loadParked pl gs = gs
+  { gsLevel        = plLevel pl
+  , gsMonsters     = plMonsters pl
+  , gsItemsOnFloor = plItems pl
+  , gsExplored     = plExplored pl
+  , gsPlayerPos    = plPlayerPos pl
+  }
+
+-- | Freshly generate the next floor and swap it in. The new level
+--   inherits the 'LevelConfig' from 'defaultLevelConfig' except
+--   for its depth, which is set to the supplied value. The player
+--   lands on the new level's 'StairsUp' tile (that's where the
+--   generator places @startPos@).
+generateAndEnter :: Int -> GameState -> GameState
+generateAndEnter depth gs =
+  let cfg            = D.defaultLevelConfig { D.lcDepth = depth }
+      (dl, start, rooms, g1) = D.generateLevel (gsRng gs) cfg
+      spawnRooms     = drop 1 rooms
+      (monsters, g2) = spawnMonsters g1 spawnRooms
+  in gs
+       { gsLevel        = dl
+       , gsMonsters     = monsters
+       , gsItemsOnFloor = []
+       , gsExplored     = Set.empty
+       , gsPlayerPos    = start
+       , gsRng          = g2
+       }
+
+-- | Descend one floor. Fails with a flavor message if the player
+--   is not standing on 'StairsDown'. If the next floor has been
+--   visited before, it is restored from 'gsLevels'; otherwise it
+--   is generated fresh.
+playerDescend :: GameState -> GameState
+playerDescend gs =
+  case tileAt (gsLevel gs) (gsPlayerPos gs) of
+    Just StairsDown ->
+      let currentDepth = dlDepth (gsLevel gs)
+          nextDepth    = currentDepth + 1
+          parked       = parkCurrent gs
+          gsParked     = gs { gsLevels = Map.insert currentDepth parked (gsLevels gs) }
+          gs' = case Map.lookup nextDepth (gsLevels gsParked) of
+            Just pl ->
+              loadParked pl
+                gsParked { gsLevels = Map.delete nextDepth (gsLevels gsParked) }
+            Nothing ->
+              generateAndEnter nextDepth gsParked
+          gs'' = gs' { gsMessages = ("You descend to depth " ++ show nextDepth ++ ".") : gsMessages gs' }
+      in fireQuestEvent (EvEnteredDepth nextDepth) gs''
+    _ ->
+      gs { gsMessages = "There are no stairs down here." : gsMessages gs }
+
+-- | Ascend one floor. Fails if the player is not on 'StairsUp' or
+--   if there is nowhere to go (i.e. we're already at depth 1).
+playerAscend :: GameState -> GameState
+playerAscend gs =
+  case tileAt (gsLevel gs) (gsPlayerPos gs) of
+    Just StairsUp ->
+      let currentDepth = dlDepth (gsLevel gs)
+          prevDepth    = currentDepth - 1
+      in if prevDepth < 1
+           then gs { gsMessages = "These stairs lead to daylight — there's nowhere further up." : gsMessages gs }
+           else
+             let parked  = parkCurrent gs
+                 gsParked = gs { gsLevels = Map.insert currentDepth parked (gsLevels gs) }
+             in case Map.lookup prevDepth (gsLevels gsParked) of
+                  Just pl ->
+                    let gs' = loadParked pl
+                          gsParked { gsLevels = Map.delete prevDepth (gsLevels gsParked) }
+                    in gs' { gsMessages = ("You climb to depth " ++ show prevDepth ++ ".") : gsMessages gs' }
+                  Nothing ->
+                    -- Shouldn't happen: you can only go up if you came from there.
+                    gs { gsMessages = "The way up is blocked by your own memory of having been there." : gsMessages gs }
+    _ ->
+      gs { gsMessages = "There are no stairs up here." : gsMessages gs }
 
 ------------------------------------------------------------
 -- Monster turns

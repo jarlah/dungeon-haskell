@@ -14,6 +14,7 @@ import Linear (V2(..))
 import Game.GameState
 import qualified Game.Logic.Inventory as Inv
 import Game.Logic.Progression (xpForNextLevel)
+import Game.Logic.Quest (Quest(..), questProgressLabel)
 import Game.Types
 
 -- | Attribute name used for "explored but not currently visible"
@@ -27,6 +28,7 @@ drawGame gs =
         [ drawGrid gs
         , drawPromptLine gs
         , drawStatus gs
+        , drawQuests gs
         , drawMessages gs
         , str "Move: arrows / hjkl / yubn   Wait: .   Get: g   Inv: i   Cmd: /   Quit: q / Esc"
         ]
@@ -109,6 +111,20 @@ drawStatus gs =
 
 drawMessages :: GameState -> Widget ()
 drawMessages gs = vBox (map str (take 3 (gsMessages gs)))
+
+-- | One-line quest panel: each active quest is shown as
+--   @"Name p/target"@, separated by two spaces. If there are no
+--   quests (shouldn't normally happen), renders an empty line so
+--   the layout doesn't jump.
+drawQuests :: GameState -> Widget ()
+drawQuests gs = case gsQuests gs of
+  [] -> str " "
+  qs -> str $ "Quests: " ++ intercalateTwo (map fmt qs)
+  where
+    fmt q = qName q ++ " " ++ questProgressLabel q
+    intercalateTwo []     = ""
+    intercalateTwo [x]    = x
+    intercalateTwo (x:xs) = x ++ "  " ++ intercalateTwo xs
 
 -- | Centered modal listing the player's inventory. Bag items are
 --   lettered @a@, @b@, @c@, ... and pressing the corresponding key

@@ -83,6 +83,10 @@ data GameAction
   | UseItem !Int
     -- ^ apply the default action (quaff / equip) to the item at
     --   the given index in 'invItems'
+  | GoDownStairs
+    -- ^ descend when standing on 'StairsDown'
+  | GoUpStairs
+    -- ^ ascend when standing on 'StairsUp'
   | Quit
   deriving (Eq, Show)
 

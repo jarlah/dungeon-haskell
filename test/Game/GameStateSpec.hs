@@ -45,6 +45,8 @@ mkFixture seed ppos pstats monsters = GameState
   , gsInventory     = emptyInventory
   , gsItemsOnFloor  = []
   , gsInventoryOpen = False
+  , gsQuests        = []
+  , gsLevels        = mempty
   }
 
 -- | Player stats strong enough to one-shot anything normal.
