@@ -6,11 +6,11 @@ synopsis:            Terminal-based roguelike dungeon crawler
 description:         A terminal-based roguelike with a pure-Haskell game
                      logic layer tested via QuickCheck + HSpec and a thin
                      Brick rendering shell.
-license:             BSD-3-Clause
+license:             MIT
 license-file:        LICENSE
-author:              Author name here
-maintainer:          example@example.com
-copyright:           2026 Author name here
+author:              Jarl André Hübenthal
+maintainer:          jarlah@protonmail.com
+copyright:           2026 Jarl André Hübenthal
 category:            Game
 build-type:          Simple
 extra-source-files:  README.md
