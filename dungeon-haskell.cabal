@@ -3,8 +3,9 @@ cabal-version:       2.2
 name:                dungeon-haskell
 version:             0.1.0.0
 synopsis:            Terminal-based roguelike dungeon crawler
-description:         A terminal-based roguelike built with Apecs + Brick,
-                     with a pure-Haskell game logic layer tested via QuickCheck.
+description:         A terminal-based roguelike with a pure-Haskell game
+                     logic layer tested via QuickCheck + HSpec and a thin
+                     Brick rendering shell.
 license:             BSD-3-Clause
 license-file:        LICENSE
 author:              Author name here
@@ -29,13 +30,30 @@ common shared
 library
   import:              shared
   hs-source-dirs:      src
-  exposed-modules:     Game.Skeleton
+  exposed-modules:
+    Game.Types
+    Game.GameState
+    Game.Logic.Movement
+    Game.Render
+    Game.Input
+  build-depends:
+    , linear
+    , vector
+    , containers
+    , brick
+    , vty
+    , vty-crossplatform
 
 executable dungeon-haskell
   import:              shared
   hs-source-dirs:      app
   main-is:             Main.hs
-  build-depends:       dungeon-haskell
+  build-depends:
+    , dungeon-haskell
+    , brick
+    , vty
+    , vty-crossplatform
+    , mtl
   ghc-options:         -threaded -rtsopts
 
 test-suite dungeon-haskell-test
@@ -43,7 +61,16 @@ test-suite dungeon-haskell-test
   type:                exitcode-stdio-1.0
   hs-source-dirs:      test
   main-is:             Spec.hs
-  build-depends:       dungeon-haskell
+  other-modules:
+    Game.Logic.MovementSpec
+  build-depends:
+    , dungeon-haskell
+    , hspec
+    , QuickCheck
+    , linear
+    , vector
+  build-tool-depends:
+    hspec-discover:hspec-discover
   ghc-options:         -threaded -rtsopts
 
 source-repository head
