@@ -36,7 +36,7 @@ import Game.Save.Types (SaveMetadata)
 import Game.Types
 import qualified Game.Logic.Combat as C
 import Game.Logic.Combat (Damage(..))
-import Game.Logic.Command (Command(..))
+import Game.Logic.Command (Command(..), isCheatCommand)
 import qualified Game.Logic.Dungeon as D
 import qualified Game.Logic.FOV as FOV
 import qualified Game.Logic.Inventory as Inv
@@ -185,6 +185,17 @@ data GameState = GameState
     --   across saves — the save codec carries whatever value is
     --   current at 'encodeSave' time, but in practice the player
     --   saves outside any prompt.
+  , gsCheatsUsed :: !Bool
+    -- ^ 'True' if any wizard / cheat command has been invoked on
+    --   this save at any point in its history. Once 'True', stays
+    --   'True' — there is deliberately no way to unset it, so a
+    --   save that was ever touched by @/heal@ or @/spawn@ can be
+    --   cleanly distinguished from a save that was earned the
+    --   hard way. Used by the launch / load menu to hide
+    --   cheat-tainted saves from players running without the
+    --   @--wizard@ flag, so the two histories don't mix. Stamped
+    --   to 'True' inside 'applyCommand' before the command itself
+    --   runs.
   } deriving (Show)
 
 -- | Actions that need a direction supplied /after/ the initiating
@@ -377,6 +388,7 @@ mkGameState gen dl start monsters = recomputeVisibility GameState
   , gsRoomDesc       = Nothing
   , gsRoomDescVisible = False
   , gsAwaitingDirection = Nothing
+  , gsCheatsUsed        = False
   }
 
 -- | Build a quest as an un-accepted *offer*. Same as 'mkQuest' but
@@ -498,24 +510,45 @@ hardcodedInitialState = mkGameState (mkStdGen 0) hardcodedRoom (V2 5 5) []
 -- Action processing
 ------------------------------------------------------------
 
--- | Apply a parsed slash-command. Commands are wizard / debug
---   helpers right now — they do not cost a turn, do not emit game
---   events, and do not advance monsters. Adding a gameplay command
---   later (e.g. @/pray@) would route through 'applyAction' instead.
+-- | Apply a parsed slash-command. Only the wizard / debug helpers
+--   are handled here — they do not cost a turn, do not emit game
+--   events, and do not advance monsters. Safe UI commands (@/help@,
+--   @/save@, ...) are dispatched inline by the prompt handler
+--   instead, because several of them need IO.
 --
---   Each command wraps its effect in 'recomputeVisibility' at the
---   end so anything that moves the player or reshapes the level
---   leaves 'gsVisible' / 'gsExplored' consistent.
+--   Every call stamps 'gsCheatsUsed' so saves written after a
+--   cheat command can never be mistaken for a clean run. The stamp
+--   is permanent — there is no way to unset it.
+--
+--   Safe commands that somehow end up here (a bug) become no-ops
+--   with a log line instead of crashing, so the parser and the
+--   dispatcher stay loosely coupled.
+--
+--   Each effect is wrapped in 'recomputeVisibility' so anything
+--   that moves the player or reshapes the level leaves 'gsVisible'
+--   / 'gsExplored' consistent.
 applyCommand :: Command -> GameState -> GameState
-applyCommand cmd gs = recomputeVisibility $ case cmd of
-  CmdReveal       -> wizCmdReveal gs
-  CmdHeal         -> wizCmdHeal gs
-  CmdKillAll      -> wizCmdKillAll gs
-  CmdTeleport p   -> wizCmdTeleport p gs
-  CmdSpawn k      -> wizCmdSpawn k gs
-  CmdXP n         -> wizCmdXP n gs
-  CmdDescend      -> wizCmdDescend gs
-  CmdAscend       -> wizCmdAscend gs
+applyCommand cmd gs =
+  let gsMarked
+        | isCheatCommand cmd = gs { gsCheatsUsed = True }
+        | otherwise          = gs
+  in recomputeVisibility $ case cmd of
+       CmdReveal       -> wizCmdReveal gsMarked
+       CmdHeal         -> wizCmdHeal gsMarked
+       CmdKillAll      -> wizCmdKillAll gsMarked
+       CmdTeleport p   -> wizCmdTeleport p gsMarked
+       CmdSpawn k      -> wizCmdSpawn k gsMarked
+       CmdXP n         -> wizCmdXP n gsMarked
+       CmdDescend      -> wizCmdDescend gsMarked
+       CmdAscend       -> wizCmdAscend gsMarked
+       -- Safe commands are dispatched inline by the prompt handler;
+       -- reaching 'applyCommand' with one is a wiring bug. Log it
+       -- and leave the state alone rather than crashing.
+       _ -> gsMarked
+              { gsMessages =
+                  ("Internal: safe command routed to applyCommand")
+                    : gsMessages gsMarked
+              }
 
 -- | Prepend a wizard-flavored log line.
 wizMsg :: String -> GameState -> GameState

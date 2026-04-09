@@ -11,6 +11,7 @@ import Data.Set (Set)
 import qualified Data.Text as T
 import qualified Graphics.Vty as V
 import qualified Graphics.Vty.CrossPlatform as VCP
+import System.Environment (getArgs)
 import System.IO (hPutStrLn, stderr)
 import System.Random (newStdGen)
 
@@ -26,11 +27,11 @@ import qualified Game.Config as Config
 import           Game.Config (AIConfig (..), GameConfig (..))
 import Game.GameState
 import Game.Input (handleKey)
-import Game.Logic.Command (parseCommand)
+import Game.Logic.Command (Command(..), parseCommand, isCheatCommand)
 import Game.Logic.Dungeon (defaultLevelConfig)
 import Game.Logic.Quest (Quest(..), QuestStatus(..), qName)
 import Game.Render
-  ( drawGame, bossAttr, doorAttr, fogAttr, npcAttr
+  ( drawGame, Name (..), bossAttr, doorAttr, fogAttr, npcAttr
   , saveMenuCursorAttr, saveMenuEmptyAttr
   , launchCursorAttr, launchDisabledAttr, launchTitleAttr
   )
@@ -85,6 +86,24 @@ data AIRuntime = AIRuntime
     --   the IORef is process-local, not serialized.
   }
 
+-- | Process-wide runtime capability flags that come from the
+--   command line rather than from persistent state. Bundled into a
+--   record so the event loop only has to close over one value, and
+--   so new flags can be added without rewiring every handler.
+--
+--   Deliberately not in 'GameState' — these are capabilities of
+--   *this* process launch, not of the saved game, and they must not
+--   round-trip through 'Binary'. A player running without
+--   @--wizard@ should not be able to invoke cheats just because
+--   they loaded a save that was written by a wizard session.
+data RuntimeFlags = RuntimeFlags
+  { rfWizardEnabled :: !Bool
+    -- ^ 'True' iff the game was launched with the @--wizard@ (or
+    --   @-w@) flag. Gates the cheat / wizard slash commands and
+    --   controls whether cheat-tainted saves are visible in the
+    --   load menu.
+  } deriving (Eq, Show)
+
 -- | The Brick custom-event type for this app. 'AIResult' carries a
 --   completed 'AIResponse' from the worker thread back to the main
 --   event loop via a 'Brick.BChan.BChan'; the event loop then folds
@@ -98,11 +117,15 @@ data AppEvent
 --   system disables audio playback (silent run). The 'AIRuntime' is
 --   always supplied — its own config decides whether requests
 --   actually fire.
-mkApp :: Maybe Audio.AudioSystem -> AIRuntime -> App GameState AppEvent ()
-mkApp mAudio aiRt = App
-  { appDraw         = drawGame
+mkApp
+  :: Maybe Audio.AudioSystem
+  -> AIRuntime
+  -> RuntimeFlags
+  -> App GameState AppEvent Name
+mkApp mAudio aiRt rFlags = App
+  { appDraw         = drawGame (rfWizardEnabled rFlags)
   , appChooseCursor = showFirstCursor
-  , appHandleEvent  = handleEvent mAudio aiRt
+  , appHandleEvent  = handleEvent mAudio aiRt rFlags
   , appStartEvent   = pure ()
   , appAttrMap      = const $ attrMap V.defAttr
       [ (fogAttr,             fg V.brightBlack)
@@ -120,26 +143,27 @@ mkApp mAudio aiRt = App
 handleEvent
   :: Maybe Audio.AudioSystem
   -> AIRuntime
-  -> BrickEvent () AppEvent
-  -> EventM () GameState ()
-handleEvent mAudio aiRt (VtyEvent (V.EvKey key mods)) = do
+  -> RuntimeFlags
+  -> BrickEvent Name AppEvent
+  -> EventM Name GameState ()
+handleEvent mAudio aiRt rFlags (VtyEvent (V.EvKey key mods)) = do
   gs <- get
   case () of
     -- Launch screen swallows everything — the player is not yet
     -- "in the game", so no other modal or gameplay key should fire
     -- until they pick an entry point.
-    _ | Just lm  <- gsLaunchMenu gs -> handleLaunchMenuKey lm key
+    _ | Just lm  <- gsLaunchMenu gs -> handleLaunchMenuKey rFlags lm key
       | gsConfirmQuit gs            -> handleConfirmQuitKey key
       | gsVictory gs                -> handleVictoryKey key
       | gsHelpOpen gs               -> handleHelpKey key
-      | Just sm  <- gsSaveMenu gs   -> handleSaveMenuKey sm key
-      | Just buf <- gsPrompt gs     -> handlePromptKey key buf
+      | Just sm  <- gsSaveMenu gs   -> handleSaveMenuKey rFlags sm key
+      | Just buf <- gsPrompt gs     -> handlePromptKey mAudio rFlags key buf
       | Just i   <- gsDialogue gs   -> handleDialogueKey mAudio aiRt i key
       | gsQuestLogOpen gs           -> handleQuestLogKey key
       | gsInventoryOpen gs          -> handleInventoryKey mAudio key
       | Just dirAct <- gsAwaitingDirection gs ->
           handleAwaitingDirectionKey mAudio dirAct key
-      | otherwise                   -> handleNormalKey mAudio aiRt key mods
+      | otherwise                   -> handleNormalKey mAudio aiRt rFlags key mods
   -- Every key event is an opportunity to swap music tracks — the
   -- player may have just walked into the boss room's line of sight,
   -- or descended onto the boss floor, or climbed back off it.
@@ -158,15 +182,15 @@ handleEvent mAudio aiRt (VtyEvent (V.EvKey key mods)) = do
   -- standing in a room on the current floor that we haven't
   -- described yet, fire a 'ReqRoomDesc'. Dedup via 'aiSeenRooms'.
   maybeFireRoomDesc aiRt
-handleEvent _ aiRt (AppEvent (AIResult resp)) =
+handleEvent _ aiRt _ (AppEvent (AIResult resp)) =
   applyAIResponse aiRt resp
-handleEvent _ _ _ = pure ()
+handleEvent _ _ _ _ = pure ()
 
 -- | Consult the current 'GameState' and tell the audio shell which
 --   music loop should be playing. The decision is delegated to
 --   'shouldPlayBossMusic', which keeps Main.hs free of dungeon
 --   geometry and set imports.
-updateMusicFor :: Maybe Audio.AudioSystem -> EventM () GameState ()
+updateMusicFor :: Maybe Audio.AudioSystem -> EventM Name GameState ()
 updateMusicFor Nothing      = pure ()
 updateMusicFor (Just audio) = do
   gs <- get
@@ -180,7 +204,7 @@ updateMusicFor (Just audio) = do
 --   modal (so a fat-fingered key can't misfire), and everything
 --   else is swallowed. There's no "continue playing" path because
 --   the dragon is dead and the boss floor has no stairs down.
-handleVictoryKey :: V.Key -> EventM () GameState ()
+handleVictoryKey :: V.Key -> EventM Name GameState ()
 handleVictoryKey (V.KChar 'q') =
   modify (\gs -> gs { gsConfirmQuit = True })
 handleVictoryKey (V.KChar 'Q') =
@@ -192,25 +216,44 @@ handleVictoryKey _ = pure ()
 -- | Keystrokes while the quit-confirmation modal is open.
 --   @y@ actually halts the app; @n@, @Esc@, or anything else
 --   closes the modal and returns to the game.
-handleConfirmQuitKey :: V.Key -> EventM () GameState ()
+handleConfirmQuitKey :: V.Key -> EventM Name GameState ()
 handleConfirmQuitKey (V.KChar 'y') = halt
 handleConfirmQuitKey (V.KChar 'Y') = halt
 handleConfirmQuitKey _ =
   modify (\gs -> gs { gsConfirmQuit = False })
 
--- | Keystrokes while the help modal is open. Any key closes it —
---   there is no selection or sub-navigation, the modal is purely a
---   reference sheet.
-handleHelpKey :: V.Key -> EventM () GameState ()
-handleHelpKey _ =
-  modify (\gs -> gs { gsHelpOpen = False })
+-- | Keystrokes while the help modal is open. 'Esc' / 'q' / '?'
+--   close it. Arrow keys, @j@ / @k@, PgUp / PgDn, Home / End drive
+--   the scroll viewport so the reference sheet stays usable on
+--   terminals that can't show the whole thing at once. Anything
+--   else is swallowed so a stray keystroke doesn't accidentally
+--   dismiss the modal mid-read.
+handleHelpKey :: V.Key -> EventM Name GameState ()
+handleHelpKey key = case key of
+  V.KEsc        -> closeHelp
+  V.KChar 'q'   -> closeHelp
+  V.KChar '?'   -> closeHelp
+  V.KUp         -> vScrollBy         helpVp (-1)
+  V.KChar 'k'   -> vScrollBy         helpVp (-1)
+  V.KDown       -> vScrollBy         helpVp 1
+  V.KChar 'j'   -> vScrollBy         helpVp 1
+  V.KPageUp     -> vScrollPage       helpVp Up
+  V.KPageDown   -> vScrollPage       helpVp Down
+  V.KHome       -> vScrollToBeginning helpVp
+  V.KEnd        -> vScrollToEnd      helpVp
+  _             -> pure ()
+  where
+    closeHelp = do
+      vScrollToBeginning helpVp
+      modify (\gs -> gs { gsHelpOpen = False })
+    helpVp = viewportScroll HelpViewport
 
 -- | Keystrokes while the quest log modal is open. Letters @a@..@z@
 --   select the active quest at that index (the selection is shown
 --   as an asterisk in the log); pressing @x@ while a selection is
 --   in place abandons that quest (flipping it to QuestFailed).
 --   Two keystrokes = built-in confirm. Esc or @j@ closes.
-handleQuestLogKey :: V.Key -> EventM () GameState ()
+handleQuestLogKey :: V.Key -> EventM Name GameState ()
 handleQuestLogKey V.KEsc =
   modify (\gs -> gs { gsQuestLogOpen = False, gsQuestLogCursor = Nothing })
 handleQuestLogKey (V.KChar 'Q') =
@@ -241,7 +284,7 @@ handleDialogueKey
   -> AIRuntime
   -> Int
   -> V.Key
-  -> EventM () GameState ()
+  -> EventM Name GameState ()
 handleDialogueKey _ _ _ V.KEsc =
   modify (\gs -> gs { gsDialogue = Nothing })
 handleDialogueKey mAudio _ npcIdx (V.KChar c)
@@ -275,7 +318,7 @@ handleDialogueKey _ _ _ _ = pure ()
 -- /and/ the player has no further quests ready to hand in here.
 -- Called after accept/turn-in so the player isn't left staring at
 -- an empty dialogue screen.
-autoCloseIfIdle :: Int -> EventM () GameState ()
+autoCloseIfIdle :: Int -> EventM Name GameState ()
 autoCloseIfIdle npcIdx = do
   gs <- get
   let stillOffering = case drop npcIdx (gsNPCs gs) of
@@ -297,7 +340,7 @@ handleAwaitingDirectionKey
   :: Maybe Audio.AudioSystem
   -> DirectionalAction
   -> V.Key
-  -> EventM () GameState ()
+  -> EventM Name GameState ()
 handleAwaitingDirectionKey mAudio dirAct key =
   case directionFromKey key of
     Just dir -> do
@@ -336,7 +379,7 @@ directionFromKey key = case key of
 --   'Esc' or 'i' closes the modal without doing anything. Modal
 --   actions still advance monsters via 'applyAction', so deciding
 --   to swap gear mid-fight carries the usual tactical cost.
-handleInventoryKey :: Maybe Audio.AudioSystem -> V.Key -> EventM () GameState ()
+handleInventoryKey :: Maybe Audio.AudioSystem -> V.Key -> EventM Name GameState ()
 handleInventoryKey _ V.KEsc =
   modify (\gs -> gs { gsInventoryOpen = False })
 handleInventoryKey _ (V.KChar 'i') =
@@ -354,18 +397,28 @@ handleInventoryKey mAudio (V.KChar c)
 handleInventoryKey _ _ = pure ()
 
 -- | Keystrokes while the slash-command prompt is open. The prompt
---   swallows all input: 'Esc' cancels, 'Enter' submits and dispatches,
---   'Backspace' edits, printable characters append. Nothing else
---   advances the game.
-handlePromptKey :: V.Key -> String -> EventM () GameState ()
-handlePromptKey key buf = case key of
+--   swallows all input: 'Esc' cancels, 'Enter' submits and
+--   dispatches, 'Backspace' edits, printable characters append.
+--   Nothing else advances the game.
+--
+--   Dispatch splits two ways. Safe UI commands (@/help@, @/save@,
+--   @/wait@, ...) are handled inline because several of them need
+--   to open modals or touch the filesystem. Wizard / cheat
+--   commands go through 'applyCommand' and are refused unless the
+--   game was launched with @--wizard@ (surfaced in 'rFlags').
+handlePromptKey
+  :: Maybe Audio.AudioSystem
+  -> RuntimeFlags
+  -> V.Key
+  -> String
+  -> EventM Name GameState ()
+handlePromptKey mAudio rFlags key buf = case key of
   V.KEsc ->
     modify (\gs -> gs { gsPrompt = Nothing })
   V.KEnter -> do
     modify (\gs -> gs { gsPrompt = Nothing })
     case parseCommand buf of
-      Right cmd ->
-        modify (applyCommand cmd)
+      Right cmd -> dispatchCommand mAudio rFlags cmd
       Left err ->
         modify (\gs -> gs { gsMessages = ("Error: " ++ err) : gsMessages gs })
   V.KBS ->
@@ -378,53 +431,95 @@ handlePromptKey key buf = case key of
     dropLast [] = []
     dropLast xs = init xs
 
+-- | Route a parsed 'Command' to the right handler. Safe UI
+--   commands open modals or call the filesystem helpers inline;
+--   wizard cheats flow through 'applyCommand' after a capability
+--   check against 'rfWizardEnabled'.
+dispatchCommand
+  :: Maybe Audio.AudioSystem
+  -> RuntimeFlags
+  -> Command
+  -> EventM Name GameState ()
+dispatchCommand mAudio rFlags cmd = case cmd of
+  -- Safe UI shortcuts: these are alternate paths to things the
+  -- player could already trigger with a keybind. No cheat check.
+  CmdHelp ->
+    modify (\gs -> gs { gsHelpOpen = True })
+  CmdQuit ->
+    modify (\gs -> gs { gsConfirmQuit = True })
+  CmdInventory ->
+    modify (\gs -> gs { gsInventoryOpen = True })
+  CmdQuests ->
+    modify $ \gs -> gs
+      { gsQuestLogOpen   = True
+      , gsQuestLogCursor = Nothing
+      }
+  CmdWait -> do
+    modify (applyAction Wait)
+    playEventsFor mAudio
+  CmdSave       -> openSaveMenu rFlags SaveMode
+  CmdLoad       -> openSaveMenu rFlags LoadMode
+  CmdQuicksave  -> doQuicksave
+  CmdQuickload  -> doQuickload
+  -- Wizard cheats: gated on the runtime capability flag.
+  _
+    | isCheatCommand cmd, not (rfWizardEnabled rFlags) ->
+        modify $ \gs -> gs
+          { gsMessages =
+              "Cheats are disabled. Launch with --wizard to enable."
+                : gsMessages gs
+          }
+    | otherwise ->
+        modify (applyCommand cmd)
+
 -- | Keystrokes while the prompt is closed. @/@ opens the prompt;
 --   @i@ opens the inventory modal; everything else goes through the
 --   normal action keymap.
 handleNormalKey
   :: Maybe Audio.AudioSystem
   -> AIRuntime
+  -> RuntimeFlags
   -> V.Key
   -> [V.Modifier]
-  -> EventM () GameState ()
+  -> EventM Name GameState ()
 -- Esc at the top priority: if the AI room-description panel is
 -- currently drawn, dismiss it without confirming quit. This keeps
 -- Esc's usual modal-dismiss semantics working for the flavor
 -- panel. Only if the panel is not visible does Esc fall through
 -- to the generic 'Quit' mapping in 'handleKey' below.
-handleNormalKey _ _ V.KEsc _ = do
+handleNormalKey _ _ _ V.KEsc _ = do
   gs <- get
   if gsRoomDescVisible gs
     then modify (\s -> s { gsRoomDescVisible = False })
     else modify (\s -> s { gsConfirmQuit = True })
-handleNormalKey _ _ (V.KChar '/') _ =
+handleNormalKey _ _ _ (V.KChar '/') _ =
   modify (\gs -> gs { gsPrompt = Just "" })
-handleNormalKey _ _ (V.KChar '?') _ =
+handleNormalKey _ _ _ (V.KChar '?') _ =
   modify (\gs -> gs { gsHelpOpen = True })
-handleNormalKey _ _ (V.KChar 'i') _ =
+handleNormalKey _ _ _ (V.KChar 'i') _ =
   modify (\gs -> gs { gsInventoryOpen = True })
 -- 'c' enters the two-step close-door mode: prompt for a direction
 -- key, then dispatch 'CloseDoor' on the next keystroke. No turn is
 -- consumed here — the turn is spent (or not) when the direction
 -- actually resolves in 'handleAwaitingDirectionKey'.
-handleNormalKey _ _ (V.KChar 'c') _ =
+handleNormalKey _ _ _ (V.KChar 'c') _ =
   modify $ \gs -> gs
     { gsAwaitingDirection = Just DirCloseDoor
     , gsMessages = "Close door in which direction?" : gsMessages gs
     }
-handleNormalKey _ _ (V.KChar 'Q') _ =
+handleNormalKey _ _ _ (V.KChar 'Q') _ =
   modify (\gs -> gs { gsQuestLogOpen = True, gsQuestLogCursor = Nothing })
 -- Quicksave (F5) and quickload (F9) are free actions: they do not
 -- advance monsters and do not run through 'applyAction' — they
 -- talk directly to the filesystem and report into 'gsMessages'.
-handleNormalKey _ _ (V.KFun 5) _ = doQuicksave
-handleNormalKey _ _ (V.KFun 9) _ = doQuickload
+handleNormalKey _ _ _ (V.KFun 5) _ = doQuicksave
+handleNormalKey _ _ _ (V.KFun 9) _ = doQuickload
 -- F2 / F3 open the full save and load picker modals respectively.
 -- Both take a snapshot of the save directory at open time so the
 -- entry list doesn't shift under the cursor mid-menu.
-handleNormalKey _ _ (V.KFun 2) _ = openSaveMenu SaveMode
-handleNormalKey _ _ (V.KFun 3) _ = openSaveMenu LoadMode
-handleNormalKey mAudio _ key mods =
+handleNormalKey _ _ rFlags (V.KFun 2) _ = openSaveMenu rFlags SaveMode
+handleNormalKey _ _ rFlags (V.KFun 3) _ = openSaveMenu rFlags LoadMode
+handleNormalKey mAudio _ _ key mods =
   case handleKey key mods of
     Just Quit ->
       -- Don't halt immediately — open a confirm modal. q and Q
@@ -442,7 +537,7 @@ handleNormalKey mAudio _ key mods =
 --   and does not advance monsters. On failure the game continues
 --   untouched with an error line in the log so the player can see
 --   what went wrong.
-doQuicksave :: EventM () GameState ()
+doQuicksave :: EventM Name GameState ()
 doQuicksave = do
   gs  <- get
   res <- liftIO (Save.writeSave Save.QuickSlot gs)
@@ -461,7 +556,7 @@ doQuicksave = do
 --   (so quicksaving with the inventory open and quickloading
 --   re-opens it). On failure the current state is preserved and
 --   an error line is pushed into the message log.
-doQuickload :: EventM () GameState ()
+doQuickload :: EventM Name GameState ()
 doQuickload = do
   res <- liftIO (Save.readSave Save.QuickSlot)
   case res of
@@ -482,7 +577,7 @@ doQuickload = do
 -- | Fire SFX for every GameEvent the last action produced.
 --   Extracted so the inventory and normal paths share one place
 --   that knows how to route events into the audio shell.
-playEventsFor :: Maybe Audio.AudioSystem -> EventM () GameState ()
+playEventsFor :: Maybe Audio.AudioSystem -> EventM Name GameState ()
 playEventsFor Nothing      = pure ()
 playEventsFor (Just audio) = do
   gs <- get
@@ -492,48 +587,64 @@ playEventsFor (Just audio) = do
 -- Launch / title screen
 --------------------------------------------------------------------
 
+-- | Drop cheat-tainted saves from a metadata list when the process
+--   is not in wizard mode. In wizard mode the list passes through
+--   untouched. The launch menu, load picker, and @Continue@ all
+--   funnel their listings through this helper so the filter
+--   policy stays in one place.
+filterLoadable :: RuntimeFlags -> [SaveMetadata] -> [SaveMetadata]
+filterLoadable rFlags
+  | rfWizardEnabled rFlags = id
+  | otherwise              = filter (not . smCheatsUsed)
+
 -- | Sample the save directory so the launch menu can enable or
 --   disable /Continue/ and /Load/ without having to poll later.
+--   Applies the wizard-mode filter so a non-wizard session with
+--   only cheat-tainted saves still sees the options greyed out.
 --   Listing errors degrade to 'False' — the menu stays usable and
 --   the player can still start a new game.
-sampleHasSaves :: IO Bool
-sampleHasSaves = do
+sampleHasSaves :: RuntimeFlags -> IO Bool
+sampleHasSaves rFlags = do
   res <- Save.listSaves
   pure $ case res of
-    Right (_:_) -> True
-    _           -> False
+    Right ms -> not (null (filterLoadable rFlags ms))
+    _        -> False
 
 -- | Keystrokes while the launch screen is up. Only navigation,
 --   selection, and quit are meaningful — everything else is
 --   swallowed so a fat-fingered key doesn't leak into the game.
-handleLaunchMenuKey :: LaunchMenu -> V.Key -> EventM () GameState ()
-handleLaunchMenuKey lm V.KUp =
+handleLaunchMenuKey
+  :: RuntimeFlags
+  -> LaunchMenu
+  -> V.Key
+  -> EventM Name GameState ()
+handleLaunchMenuKey _  lm V.KUp =
   let n = length launchOptions
       c = (lmCursor lm - 1) `mod` n
   in modify $ \gs -> gs { gsLaunchMenu = Just lm { lmCursor = c } }
-handleLaunchMenuKey lm V.KDown =
+handleLaunchMenuKey _  lm V.KDown =
   let n = length launchOptions
       c = (lmCursor lm + 1) `mod` n
   in modify $ \gs -> gs { gsLaunchMenu = Just lm { lmCursor = c } }
-handleLaunchMenuKey lm V.KEnter = runLaunchOption lm
-handleLaunchMenuKey _  (V.KChar 'q') = halt
-handleLaunchMenuKey _  (V.KChar 'Q') = halt
-handleLaunchMenuKey _  V.KEsc        = halt
+handleLaunchMenuKey rFlags lm V.KEnter = runLaunchOption rFlags lm
+handleLaunchMenuKey _  _  (V.KChar 'q') = halt
+handleLaunchMenuKey _  _  (V.KChar 'Q') = halt
+handleLaunchMenuKey _  _  V.KEsc        = halt
 -- Letter shortcuts: n/c/l/q match the first letter of each option
 -- so a keyboard player doesn't have to arrow-navigate.
-handleLaunchMenuKey lm (V.KChar 'n') =
-  runLaunchOption lm { lmCursor = 0 } -- New Game
-handleLaunchMenuKey lm (V.KChar 'c')
-  | lmHasSaves lm = runLaunchOption lm { lmCursor = 1 } -- Continue
-handleLaunchMenuKey lm (V.KChar 'l')
-  | lmHasSaves lm = runLaunchOption lm { lmCursor = 2 } -- Load
-handleLaunchMenuKey _ _ = pure ()
+handleLaunchMenuKey rFlags lm (V.KChar 'n') =
+  runLaunchOption rFlags lm { lmCursor = 0 } -- New Game
+handleLaunchMenuKey rFlags lm (V.KChar 'c')
+  | lmHasSaves lm = runLaunchOption rFlags lm { lmCursor = 1 } -- Continue
+handleLaunchMenuKey rFlags lm (V.KChar 'l')
+  | lmHasSaves lm = runLaunchOption rFlags lm { lmCursor = 2 } -- Load
+handleLaunchMenuKey _ _ _ = pure ()
 
 -- | Execute the option currently highlighted by 'lmCursor'.
 --   Disabled options (Continue / Load with no saves) are silently
 --   ignored so the UI doesn't need a separate "error" state.
-runLaunchOption :: LaunchMenu -> EventM () GameState ()
-runLaunchOption lm = case drop (lmCursor lm) launchOptions of
+runLaunchOption :: RuntimeFlags -> LaunchMenu -> EventM Name GameState ()
+runLaunchOption rFlags lm = case drop (lmCursor lm) launchOptions of
   []        -> pure ()
   (opt : _) -> case opt of
     LaunchNewGame ->
@@ -542,48 +653,52 @@ runLaunchOption lm = case drop (lmCursor lm) launchOptions of
       modify $ \gs -> gs { gsLaunchMenu = Nothing }
     LaunchContinue
       | not (lmHasSaves lm) -> pure ()
-      | otherwise           -> loadMostRecent
+      | otherwise           -> loadMostRecent rFlags
     LaunchLoad
       | not (lmHasSaves lm) -> pure ()
       | otherwise           -> do
           -- Clear the launch menu first so the save picker layers
           -- on top of the gameplay screen the way it does mid-run.
           modify $ \gs -> gs { gsLaunchMenu = Nothing }
-          openSaveMenu LoadMode
+          openSaveMenu rFlags LoadMode
     LaunchQuit -> halt
 
--- | Load the most recently modified save, whatever slot it lives
---   in. 'Save.listSaves' already sorts newest-first, so we just
---   take the head. On any failure we surface a message and leave
---   the launch menu open so the player can pick again.
-loadMostRecent :: EventM () GameState ()
-loadMostRecent = do
+-- | Load the most recently modified save visible to the current
+--   session. Cheat-tainted saves are filtered out in non-wizard
+--   mode so a clean session can't accidentally continue a hacked
+--   run. 'Save.listSaves' already sorts newest-first, so we just
+--   take the head of the filtered list. On any failure we surface
+--   a message and leave the launch menu open so the player can
+--   pick again.
+loadMostRecent :: RuntimeFlags -> EventM Name GameState ()
+loadMostRecent rFlags = do
   listRes <- liftIO Save.listSaves
   case listRes of
     Left err ->
       launchError ("Couldn't list saves: " ++ showSaveError err)
-    Right []  ->
-      launchError "No saves to continue from."
-    Right (md : _) -> do
-      readRes <- liftIO (Save.readSave (smSlot md))
-      case readRes of
-        Left err ->
-          launchError ("Continue failed: " ++ showSaveError err)
-        Right loaded ->
-          -- Loaded state drops the launch menu automatically
-          -- because 'performSaveAt' wiped it before the blob was
-          -- written. Prepend a breadcrumb so the player sees the
-          -- load happened in the message log.
-          put loaded
-            { gsLaunchMenu = Nothing
-            , gsMessages   = "Continued from most recent save."
-                             : gsMessages loaded
-            }
+    Right ms -> case filterLoadable rFlags ms of
+      []       ->
+        launchError "No saves to continue from."
+      (md : _) -> do
+        readRes <- liftIO (Save.readSave (smSlot md))
+        case readRes of
+          Left err ->
+            launchError ("Continue failed: " ++ showSaveError err)
+          Right loaded ->
+            -- Loaded state drops the launch menu automatically
+            -- because 'performSaveAt' wiped it before the blob was
+            -- written. Prepend a breadcrumb so the player sees the
+            -- load happened in the message log.
+            put loaded
+              { gsLaunchMenu = Nothing
+              , gsMessages   = "Continued from most recent save."
+                               : gsMessages loaded
+              }
 
 -- | Push a one-line error into 'gsMessages' without closing the
 --   launch menu. Used when 'Continue' can't find or can't read the
 --   most recent save.
-launchError :: String -> EventM () GameState ()
+launchError :: String -> EventM Name GameState ()
 launchError msg =
   modify $ \gs -> gs { gsMessages = msg : gsMessages gs }
 
@@ -599,15 +714,19 @@ numberedSlotCount :: Int
 numberedSlotCount = 6
 
 -- | Open the save/load modal in the given mode, snapshotting the
---   current save directory into 'smSlots'. If the listing itself
---   fails, fall back to a menu that only shows empty placeholder
---   rows — the player can still write into them, and the error
---   is surfaced in 'gsMessages' so the failure is visible.
-openSaveMenu :: SaveMenuMode -> EventM () GameState ()
-openSaveMenu mode = do
+--   current save directory into 'smSlots'. Cheat-tainted saves
+--   are filtered out via 'filterLoadable' so a non-wizard session
+--   doesn't see them in either mode (writing over one reclaims
+--   the slot as a clean save, reading one is blocked). If the
+--   listing itself fails, fall back to a menu that only shows
+--   empty placeholder rows — the player can still write into
+--   them, and the error is surfaced in 'gsMessages' so the
+--   failure is visible.
+openSaveMenu :: RuntimeFlags -> SaveMenuMode -> EventM Name GameState ()
+openSaveMenu rFlags mode = do
   res <- liftIO Save.listSaves
   let (metas, mErr) = case res of
-        Right ms -> (ms, Nothing)
+        Right ms -> (filterLoadable rFlags ms, Nothing)
         Left err -> ([], Just err)
       entries = buildSaveMenuEntries metas
       menu    = SaveMenu
@@ -665,7 +784,7 @@ showSaveError err = case err of
   Save.SaveIOError e     -> e
 
 -- | Close the save menu and append a message to the log.
-closeSaveMenu :: String -> EventM () GameState ()
+closeSaveMenu :: String -> EventM Name GameState ()
 closeSaveMenu msg =
   modify $ \gs -> gs
     { gsSaveMenu = Nothing
@@ -675,19 +794,19 @@ closeSaveMenu msg =
 -- | Keystrokes while the save/load modal is open. The menu has
 --   three layers: (1) normal cursor navigation + letter selection,
 --   (2) overwrite confirmation (save mode only), and (3) close.
-handleSaveMenuKey :: SaveMenu -> V.Key -> EventM () GameState ()
-handleSaveMenuKey sm V.KEsc
+handleSaveMenuKey :: RuntimeFlags -> SaveMenu -> V.Key -> EventM Name GameState ()
+handleSaveMenuKey _ sm V.KEsc
   | smConfirm sm =
       -- Esc inside a confirm just cancels the confirm, not the menu.
       modify $ \gs -> gs { gsSaveMenu = Just sm { smConfirm = False } }
   | otherwise =
       modify $ \gs -> gs { gsSaveMenu = Nothing }
-handleSaveMenuKey sm (V.KChar 'y')
+handleSaveMenuKey _ sm (V.KChar 'y')
   | smConfirm sm = performSaveAt sm (smCursor sm)
-handleSaveMenuKey sm (V.KChar 'n')
+handleSaveMenuKey _ sm (V.KChar 'n')
   | smConfirm sm =
       modify $ \gs -> gs { gsSaveMenu = Just sm { smConfirm = False } }
-handleSaveMenuKey sm (V.KChar c)
+handleSaveMenuKey rFlags sm (V.KChar c)
   | smConfirm sm = case c of
       -- 'Y' as a forgiving shift-variant.
       'Y' -> performSaveAt sm (smCursor sm)
@@ -697,20 +816,20 @@ handleSaveMenuKey sm (V.KChar c)
       if idx < length (smSlots sm)
         then selectAt sm idx
         else pure ()
-  | c == 'x' = deleteAt sm (smCursor sm)
-handleSaveMenuKey _ V.KUp =
+  | c == 'x' = deleteAt rFlags sm (smCursor sm)
+handleSaveMenuKey _ _ V.KUp =
   modify $ \gs -> case gsSaveMenu gs of
     Just m ->
       gs { gsSaveMenu = Just m { smCursor = max 0 (smCursor m - 1) } }
     Nothing -> gs
-handleSaveMenuKey _ V.KDown =
+handleSaveMenuKey _ _ V.KDown =
   modify $ \gs -> case gsSaveMenu gs of
     Just m ->
       let n = length (smSlots m)
           c = min (n - 1) (smCursor m + 1)
       in gs { gsSaveMenu = Just m { smCursor = c } }
     Nothing -> gs
-handleSaveMenuKey _ V.KEnter =
+handleSaveMenuKey _ _ V.KEnter =
   -- Enter on the cursor row is the same as pressing the row's
   -- letter key — acts as "select current". Routes through the
   -- same code path.
@@ -719,13 +838,13 @@ handleSaveMenuKey _ V.KEnter =
     case gsSaveMenu gs of
       Just m  -> selectAt m (smCursor m)
       Nothing -> pure ()
-handleSaveMenuKey _ _ = pure ()
+handleSaveMenuKey _ _ _ = pure ()
 
 -- | Handle a slot row being picked via a letter or Enter.
 --   Save mode: empty slot → write immediately; non-empty → ask to
 --   confirm overwrite. Load mode: empty slot → no-op (can't load
 --   nothing); non-empty → read and replace 'GameState'.
-selectAt :: SaveMenu -> Int -> EventM () GameState ()
+selectAt :: SaveMenu -> Int -> EventM Name GameState ()
 selectAt sm idx = case drop idx (smSlots sm) of
   []          -> pure ()
   (entry : _) -> case smMode sm of
@@ -743,7 +862,7 @@ selectAt sm idx = case drop idx (smSlots sm) of
 -- | Commit a save to the slot at the given index and close the
 --   menu with a status message. Uses the cursor from the passed-in
 --   menu state so confirm-then-yes targets the row the user saw.
-performSaveAt :: SaveMenu -> Int -> EventM () GameState ()
+performSaveAt :: SaveMenu -> Int -> EventM Name GameState ()
 performSaveAt sm idx = case drop idx (smSlots sm) of
   []          -> pure ()
   (entry : _) -> do
@@ -762,7 +881,7 @@ performSaveAt sm idx = case drop idx (smSlots sm) of
 --   success the loaded state wholesale replaces 'GameState' and
 --   the menu field is cleared (it was 'Nothing' in the save file
 --   because 'performSaveAt' wiped it before writing).
-performLoadAt :: SaveMenuEntry -> EventM () GameState ()
+performLoadAt :: SaveMenuEntry -> EventM Name GameState ()
 performLoadAt entry = do
   res <- liftIO (Save.readSave (entrySlot entry))
   case res of
@@ -777,8 +896,8 @@ performLoadAt entry = do
 -- | Delete the save at the cursor row and refresh the menu in
 --   place. Idempotent — 'Save.deleteSave' succeeds silently when
 --   the file is already absent.
-deleteAt :: SaveMenu -> Int -> EventM () GameState ()
-deleteAt sm idx = case drop idx (smSlots sm) of
+deleteAt :: RuntimeFlags -> SaveMenu -> Int -> EventM Name GameState ()
+deleteAt rFlags sm idx = case drop idx (smSlots sm) of
   []          -> pure ()
   (entry : _) -> case sseMeta entry of
     Nothing -> pure ()   -- nothing to delete
@@ -791,7 +910,7 @@ deleteAt sm idx = case drop idx (smSlots sm) of
           -- Re-list so the row flips to 'empty'. Cheap at our sizes.
           listRes <- liftIO Save.listSaves
           let metas = case listRes of
-                Right ms -> ms
+                Right ms -> filterLoadable rFlags ms
                 Left _   -> []
           modify $ \gs -> gs
             { gsSaveMenu = Just sm
@@ -851,7 +970,7 @@ stopAIRuntime rt = do
 --   because either the dialogue is closed, AI is disabled, or the
 --   greeting is already cached. The cost of checking is a few
 --   pattern matches.
-maybeFireGreeting :: AIRuntime -> EventM () GameState ()
+maybeFireGreeting :: AIRuntime -> EventM Name GameState ()
 maybeFireGreeting rt
   | not (aiEnabled (aiCfg rt)) = pure ()
   | otherwise = do
@@ -895,7 +1014,7 @@ describeNPCRole _ = "Quest Master"
 --   where the JSON is parsed into a 'Quest' and appended to the
 --   Quest Master's offer list. The player discovers it next time
 --   they open the dialogue.
-maybeFireQuest :: AIRuntime -> EventM () GameState ()
+maybeFireQuest :: AIRuntime -> EventM Name GameState ()
 maybeFireQuest rt
   | not (aiEnabled (aiCfg rt)) = pure ()
   | otherwise = do
@@ -923,7 +1042,7 @@ maybeFireQuest rt
 --   Any pending description from the previous room is hidden the
 --   instant a new request fires, so the old panel can't linger on
 --   top of the new room while the reply is in flight.
-maybeFireRoomDesc :: AIRuntime -> EventM () GameState ()
+maybeFireRoomDesc :: AIRuntime -> EventM Name GameState ()
 maybeFireRoomDesc rt
   | not (aiEnabled (aiCfg rt)) = pure ()
   | otherwise = do
@@ -968,7 +1087,7 @@ maybeFireRoomDesc rt
 --   Unknown or stale tokens (for example, a response that arrives
 --   after a save was loaded and the token map was wiped) are
 --   silently dropped — they're cosmetic.
-applyAIResponse :: AIRuntime -> AIResponse -> EventM () GameState ()
+applyAIResponse :: AIRuntime -> AIResponse -> EventM Name GameState ()
 applyAIResponse rt resp = case resp of
   RespGreeting tok (Right greetTxt) -> do
     mSlot <- liftIO $ atomicModifyIORef' (aiTokenMap rt) $ \m ->
@@ -1077,7 +1196,16 @@ appendQuestToFirstNPC q gs = case gsNPCs gs of
 
 main :: IO ()
 main = do
-  -- Config first: a bad config file should fail loudly and early
+  -- CLI flags first — a single boolean ride-along that decides
+  -- whether this process is allowed to run wizard cheats and
+  -- whether it's allowed to see cheat-tainted saves in the load
+  -- menu. Kept deliberately hand-rolled (no optparse-applicative
+  -- dependency) because we only need one flag and the parse is
+  -- two lines.
+  args <- getArgs
+  let rFlags = parseArgs args
+
+  -- Config next: a bad config file should fail loudly and early
   -- rather than partially running the game with surprise defaults.
   cfgRes <- Config.loadConfig Nothing
   gameCfg <- case cfgRes of
@@ -1088,7 +1216,7 @@ main = do
       pure Config.defaultGameConfig
 
   gen <- newStdGen
-  hasSaves <- sampleHasSaves
+  hasSaves <- sampleHasSaves rFlags
   -- The initial state is a fresh run with the launch screen
   -- layered on top. Picking /New Game/ drops the launch field and
   -- reveals this same state; picking /Continue/ or /Load/ replaces
@@ -1117,5 +1245,19 @@ main = do
             stopAIRuntime
             $ \aiRt -> do
       initialVty <- buildVty
-      _ <- customMain initialVty buildVty (Just aiChan) (mkApp mAudio aiRt) initialState
+      _ <- customMain initialVty buildVty (Just aiChan)
+             (mkApp mAudio aiRt rFlags) initialState
       pure ()
+
+-- | Parse the CLI flags we care about out of a raw 'getArgs'
+--   vector. Currently a single boolean — @--wizard@ / @-w@
+--   enables cheats for this process — but kept as a dedicated
+--   helper so adding more flags is a local change. Unknown
+--   arguments are silently ignored; there is no plan for positional
+--   arguments, and a strict parser would turn a user's typo into
+--   a startup crash.
+parseArgs :: [String] -> RuntimeFlags
+parseArgs args = RuntimeFlags
+  { rfWizardEnabled =
+      any (`elem` ["--wizard", "-w", "--cheats"]) args
+  }

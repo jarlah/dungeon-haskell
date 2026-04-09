@@ -5,14 +5,24 @@
 --   plain ADT and a pure @parseCommand@ function so it can be
 --   unit-tested without touching Brick.
 --
---   Every command is a *wizard / debug* helper right now. They
---   don't cost a turn and they don't advance monsters — they are
---   tools for poking at game state while developing or
---   playtesting. Gameplay commands (@/talk@, @/pray@, ...) would
---   route differently.
+--   Commands fall into two buckets:
+--
+--   * **Safe commands** — UI shortcuts (@/help@, @/save@, @/quit@,
+--     ...) that don't modify the game world in ways the normal
+--     keybindings wouldn't. Always available. 'Main' dispatches
+--     them inline because several of them need to do IO (open a
+--     save picker, write a quicksave file).
+--
+--   * **Wizard / cheat commands** — hacks that modify the world
+--     directly (reveal map, heal, spawn monsters, teleport, ...).
+--     Only allowed when the game was launched with @--wizard@.
+--     Dispatched through 'Game.GameState.applyCommand', which also
+--     stamps 'gsCheatsUsed' the moment any of them runs so the
+--     save file can be flagged as a wizard-touched run.
 module Game.Logic.Command
   ( Command(..)
   , parseCommand
+  , isCheatCommand
   ) where
 
 import Data.Char (toLower)
@@ -23,9 +33,31 @@ import Game.Types (MonsterKind(..), Pos)
 
 -- | A parsed prompt command. Adding a new command is a matter of
 --   adding a constructor here, a parser case in 'parseCommand',
---   and a dispatch arm in 'Game.GameState.applyCommand'.
+--   and a dispatch arm in either 'handlePromptKey' (safe commands
+--   that need IO / modal state) or 'Game.GameState.applyCommand'
+--   (pure wizard commands).
 data Command
-  = CmdReveal
+  -- Safe UI commands — always available.
+  = CmdHelp
+    -- ^ open the help modal
+  | CmdQuit
+    -- ^ open the quit-confirmation modal
+  | CmdInventory
+    -- ^ open the inventory modal
+  | CmdQuests
+    -- ^ open the quest log modal
+  | CmdWait
+    -- ^ pass a turn (equivalent to the Wait action key)
+  | CmdSave
+    -- ^ open the save picker modal
+  | CmdLoad
+    -- ^ open the load picker modal
+  | CmdQuicksave
+    -- ^ write the current state to the quicksave slot
+  | CmdQuickload
+    -- ^ load the quicksave slot
+  -- Wizard / cheat commands — gated on the @--wizard@ CLI flag.
+  | CmdReveal
     -- ^ mark every tile on the current level as explored
   | CmdHeal
     -- ^ restore the player to full HP
@@ -43,6 +75,33 @@ data Command
     -- ^ force-ascend without standing on stairs (refused at depth 1)
   deriving (Eq, Show)
 
+-- | 'True' if the command is a wizard / cheat helper that modifies
+--   the game world directly. Used by the prompt dispatch to reject
+--   these commands unless the player launched the game with
+--   @--wizard@, and by 'Game.GameState.applyCommand' to stamp
+--   'gsCheatsUsed' on the save.
+isCheatCommand :: Command -> Bool
+isCheatCommand cmd = case cmd of
+  -- Safe UI shortcuts.
+  CmdHelp       -> False
+  CmdQuit       -> False
+  CmdInventory  -> False
+  CmdQuests     -> False
+  CmdWait       -> False
+  CmdSave       -> False
+  CmdLoad       -> False
+  CmdQuicksave  -> False
+  CmdQuickload  -> False
+  -- Wizard cheats.
+  CmdReveal     -> True
+  CmdHeal       -> True
+  CmdKillAll    -> True
+  CmdTeleport _ -> True
+  CmdSpawn    _ -> True
+  CmdXP       _ -> True
+  CmdDescend    -> True
+  CmdAscend     -> True
+
 -- | Parse a raw prompt buffer into a 'Command'. Leading whitespace
 --   and a single leading @/@ are tolerated so the user can type
 --   either @reveal@ or @/reveal@. The verb is matched
@@ -54,6 +113,23 @@ parseCommand raw =
   case words (stripLeadSlash (dropWhile (== ' ') raw)) of
     [] -> Left "empty command"
     (w : args) -> case map toLower w of
+      -- Safe UI commands.
+      "help"       -> nullary CmdHelp       args
+      "quit"       -> nullary CmdQuit       args
+      "exit"       -> nullary CmdQuit       args
+      "inv"        -> nullary CmdInventory  args
+      "inventory"  -> nullary CmdInventory  args
+      "quests"     -> nullary CmdQuests     args
+      "questlog"   -> nullary CmdQuests     args
+      "wait"       -> nullary CmdWait       args
+      "rest"       -> nullary CmdWait       args
+      "save"       -> nullary CmdSave       args
+      "load"       -> nullary CmdLoad       args
+      "quicksave"  -> nullary CmdQuicksave  args
+      "qs"         -> nullary CmdQuicksave  args
+      "quickload"  -> nullary CmdQuickload  args
+      "ql"         -> nullary CmdQuickload  args
+      -- Wizard cheats.
       "reveal"    -> nullary CmdReveal args
       "heal"      -> nullary CmdHeal args
       "kill-all"  -> nullary CmdKillAll args

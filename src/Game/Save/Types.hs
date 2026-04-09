@@ -65,10 +65,16 @@ instance Binary SaveError
 --   'Binary' cleanly and can live inside 'GameState' as UI state
 --   without pulling in 'binary-orphans'.
 data SaveMetadata = SaveMetadata
-  { smSlot      :: !SaveSlot
-  , smDepth     :: !Int
-  , smPlayerLvl :: !Int
-  , smPlayerHP  :: !Int
+  { smSlot       :: !SaveSlot
+  , smDepth      :: !Int
+  , smPlayerLvl  :: !Int
+  , smPlayerHP   :: !Int
+  , smCheatsUsed :: !Bool
+    -- ^ 'True' if the saved 'GameState' has its 'gsCheatsUsed'
+    --   flag set, i.e. a wizard command was invoked at some point
+    --   in this save's history. The launch / load menu uses this
+    --   to hide cheat-tainted saves from non-wizard sessions so a
+    --   clean run can't be contaminated by loading a hacked one.
   } deriving (Eq, Show, Generic)
 
 instance Binary SaveMetadata
@@ -91,5 +97,9 @@ instance Binary SaveMetadata
 --   * @DHSAVE04@ — Milestone 16 follow-up. 'GameState' gained
 --     'gsAwaitingDirection' for the two-step close-door input mode,
 --     and 'GameAction' gained the 'CloseDoor' constructor.
+--   * @DHSAVE05@ — Wizard-mode split. 'GameState' gained the
+--     'gsCheatsUsed' flag, and 'SaveMetadata' gained the matching
+--     'smCheatsUsed' field so the load menu can distinguish clean
+--     saves from cheat-touched ones without reading the whole blob.
 saveMagic :: BL.ByteString
-saveMagic = BL8.pack "DHSAVE04"
+saveMagic = BL8.pack "DHSAVE05"

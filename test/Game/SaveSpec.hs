@@ -70,8 +70,8 @@ spec = do
           expectationFailure
             ("expected SaveCorrupt, got: " ++ show other)
 
-    it "saveMagic is exactly DHSAVE04" $
-      saveMagic `shouldBe` BL8.pack "DHSAVE04"
+    it "saveMagic is exactly DHSAVE05" $
+      saveMagic `shouldBe` BL8.pack "DHSAVE05"
 
   describe "slotFileName / slotFromFileName" $ do
 
@@ -118,17 +118,20 @@ spec = do
       -- smPlayerHP off a returned entry so the record-construction
       -- path in 'readMetaWithMTime' is actually evaluated. Uses
       -- 'hardcodedInitialState', whose level is depth 1 and whose
-      -- player is level 1 with 20 HP via 'defaultPlayerStats'.
+      -- player is level 1 with 20 HP via 'defaultPlayerStats',
+      -- and whose 'gsCheatsUsed' is 'False' because no cheat has
+      -- been applied.
       _ <- writeSave (NumberedSlot 1) hardcodedInitialState
       res <- listSaves
       case res of
         Left e   -> expectationFailure ("listSaves failed: " ++ show e)
         Right [] -> expectationFailure "listSaves returned no entries"
         Right (md : _) -> do
-          smSlot      md `shouldBe` NumberedSlot 1
-          smDepth     md `shouldBe` 1
-          smPlayerLvl md `shouldBe` 1
-          smPlayerHP  md `shouldBe` 20
+          smSlot       md `shouldBe` NumberedSlot 1
+          smDepth      md `shouldBe` 1
+          smPlayerLvl  md `shouldBe` 1
+          smPlayerHP   md `shouldBe` 20
+          smCheatsUsed md `shouldBe` False
 
     it "listSaves skips stray files it doesn't recognize" $ do
       _ <- writeSave QuickSlot hardcodedInitialState

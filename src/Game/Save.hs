@@ -371,10 +371,11 @@ listSaves = do
               Left _  -> pure Nothing
               Right t -> pure $ Just
                 ( SaveMetadata
-                    { smSlot      = slot
-                    , smDepth     = dlDepth (gsLevel gs)
-                    , smPlayerLvl = sLevel (gsPlayerStats gs)
-                    , smPlayerHP  = sHP (gsPlayerStats gs)
+                    { smSlot       = slot
+                    , smDepth      = dlDepth (gsLevel gs)
+                    , smPlayerLvl  = sLevel (gsPlayerStats gs)
+                    , smPlayerHP   = sHP (gsPlayerStats gs)
+                    , smCheatsUsed = gsCheatsUsed gs
                     }
                 , t
                 )

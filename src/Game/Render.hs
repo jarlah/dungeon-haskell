@@ -1,5 +1,6 @@
 module Game.Render
   ( drawGame
+  , Name (..)
   , fogAttr
   , npcAttr
   , bossAttr
@@ -12,7 +13,7 @@ module Game.Render
   ) where
 
 import Brick
-import Brick.Widgets.Border (borderWithLabel)
+import Brick.Widgets.Border (borderWithLabel, hBorder)
 import Brick.Widgets.Center (centerLayer)
 import Data.List (find)
 import qualified Data.Set as Set
@@ -26,6 +27,18 @@ import Game.Logic.Quest
   ( Quest(..), QuestStatus(..), questDescription, questProgressLabel )
 import Game.Save.Types (SaveMetadata(..))
 import Game.Types
+
+-- | Brick widget-name type for this app.
+--
+--   Brick identifies stateful widgets (viewports, editors, lists,
+--   and any site that shows a cursor) by a user-chosen name type.
+--   Most of our UI is stateless and only ever needs a single
+--   "default" tag — 'NameDefault' — which covers the cursor
+--   parked on the prompt line. 'HelpViewport' tags the scrollable
+--   region inside the help modal so its scroll position can be
+--   driven from 'handleHelpKey'.
+data Name = NameDefault | HelpViewport
+  deriving (Eq, Ord, Show)
 
 -- | Attribute name used for "explored but not currently visible"
 --   tiles. Main wires this to a dim color in its 'attrMap'.
@@ -82,8 +95,12 @@ launchDisabledAttr = attrName "launchDisabled"
 launchTitleAttr :: AttrName
 launchTitleAttr = attrName "launchTitle"
 
-drawGame :: GameState -> [Widget ()]
-drawGame gs =
+-- | Top-level Brick draw function. The 'Bool' is the @--wizard@
+--   runtime flag: it's forwarded into the help modal so the wizard
+--   command section is hidden when cheats are disabled, and never
+--   advertised to a clean-run player.
+drawGame :: Bool -> GameState -> [Widget Name]
+drawGame wizardEnabled gs =
   let baseLayer = vBox
         [ drawGrid gs
         , drawPromptLine gs
@@ -112,7 +129,7 @@ drawGame gs =
          _
            | gsVictory      gs  -> [drawVictoryModal, baseLayer]
            | gsConfirmQuit  gs  -> [drawQuitConfirmModal, baseLayer]
-           | gsHelpOpen     gs  -> [drawHelpModal, baseLayer]
+           | gsHelpOpen     gs  -> [drawHelpModal wizardEnabled, baseLayer]
            | Just sm <- gsSaveMenu gs -> [drawSaveMenuModal sm, baseLayer]
            | gsQuestLogOpen gs  -> [drawQuestLogModal gs, baseLayer]
            | gsInventoryOpen gs -> [drawInventoryModal gs, baseLayer]
@@ -127,18 +144,18 @@ drawGame gs =
 --   the terminal cursor (some terminals ignore hide-cursor
 --   escapes, so we keep it visually quiet). When the prompt is
 --   open it shows @> buf@ with the cursor parked after the buffer.
-drawPromptLine :: GameState -> Widget ()
+drawPromptLine :: GameState -> Widget Name
 drawPromptLine gs = case gsPrompt gs of
   Nothing  ->
-    showCursor () (Location (0, 0)) $ str " "
+    showCursor NameDefault (Location (0, 0)) $ str " "
   Just buf ->
     let line = "> " ++ buf
-    in showCursor () (Location (length line, 0)) $ str line
+    in showCursor NameDefault (Location (length line, 0)) $ str line
 
 -- | Render the dungeon one row at a time. Each cell is classified
 --   into one of three states: visible (normal), explored-but-not-
 --   visible (dim fog), or unseen (blank).
-drawGrid :: GameState -> Widget ()
+drawGrid :: GameState -> Widget Name
 drawGrid gs =
   let dl  = gsLevel gs
       vis = gsVisible  gs
@@ -149,7 +166,7 @@ drawGrid gs =
            | x <- [0 .. dlWidth dl - 1] ]
        | y <- [0 .. dlHeight dl - 1] ]
 
-drawCell :: GameState -> Set Pos -> Set Pos -> Pos -> Widget ()
+drawCell :: GameState -> Set Pos -> Set Pos -> Pos -> Widget Name
 drawCell gs vis exp_ pos
   | pos `Set.member` vis =
       visibleCell gs pos
@@ -163,7 +180,7 @@ drawCell gs vis exp_ pos
 --   monster, NPC, item on floor, terrain. Multi-tile bosses paint
 --   their glyph on every tile of their footprint — so a 2x2
 --   dragon shows up as a 2x2 block of @D@.
-visibleCell :: GameState -> Pos -> Widget ()
+visibleCell :: GameState -> Pos -> Widget Name
 visibleCell gs pos
   | pos == gsPlayerPos gs = str "@"
   | Just m <- find (`monsterOccupies` pos) (gsMonsters gs) =
@@ -194,7 +211,7 @@ tileGlyph dl pos = case tileAt dl pos of
   Just StairsUp      -> '<'
   Nothing            -> ' '
 
-drawStatus :: GameState -> Widget ()
+drawStatus :: GameState -> Widget Name
 drawStatus gs =
   let s       = gsPlayerStats gs
       effStats = Inv.effectiveStats s (gsInventory gs)
@@ -208,14 +225,14 @@ drawStatus gs =
              ++ (if gsDead gs then "   *** YOU DIED ***" else "")
   in str status
 
-drawMessages :: GameState -> Widget ()
+drawMessages :: GameState -> Widget Name
 drawMessages gs = vBox (map str (take 3 (gsMessages gs)))
 
 -- | One-line quest panel: each active quest is shown as
 --   @"Name p/target"@, separated by two spaces. If there are no
 --   quests (shouldn't normally happen), renders an empty line so
 --   the layout doesn't jump.
-drawQuests :: GameState -> Widget ()
+drawQuests :: GameState -> Widget Name
 drawQuests gs = case gsQuests gs of
   [] -> str " "
   qs -> str $ "Quests: " ++ intercalateTwo (map fmt qs)
@@ -229,7 +246,7 @@ drawQuests gs = case gsQuests gs of
 --   lettered @a@, @b@, @c@, ... and pressing the corresponding key
 --   while the modal is open applies the item's default action
 --   (quaff a potion, equip a weapon or armor).
-drawInventoryModal :: GameState -> Widget ()
+drawInventoryModal :: GameState -> Widget Name
 drawInventoryModal gs =
   let inv    = gsInventory gs
       header =
@@ -261,7 +278,7 @@ drawInventoryModal gs =
 --     pay the full bounty; no @*@ means they'll pay half.
 --   * Lowercase letters @a@..@z@ accept a new offer.
 --   * @Esc@ closes without any choice, leaving both lists intact.
-drawDialogueModal :: [Quest] -> Int -> NPC -> Widget ()
+drawDialogueModal :: [Quest] -> Int -> NPC -> Widget Name
 drawDialogueModal quests npcIdx npc =
   let ready = [ q | q <- quests, qStatus q == QuestReadyToTurnIn ]
       -- Prefer the AI-generated greeting when we have one cached;
@@ -312,7 +329,7 @@ drawDialogueModal quests npcIdx npc =
 --   abandoned (two keystrokes serve as a built-in confirm). The
 --   selected quest's letter is decorated with an asterisk so the
 --   player can see what they're about to abandon.
-drawQuestLogModal :: GameState -> Widget ()
+drawQuestLogModal :: GameState -> Widget Name
 drawQuestLogModal gs =
   let qs         = gsQuests gs
       active     = [ q | q <- qs, qStatus q == QuestActive ]
@@ -358,7 +375,7 @@ drawQuestLogModal gs =
 --   walk around while it's on screen — 'handleNormalKey' binds
 --   Esc to dismiss it at the lowest priority so it doesn't
 --   shadow any other modal's Esc handling.
-drawRoomDescPanel :: String -> Widget ()
+drawRoomDescPanel :: String -> Widget Name
 drawRoomDescPanel desc =
   centerLayer
     $ hLimit 60
@@ -373,7 +390,7 @@ drawRoomDescPanel desc =
 -- | A tiny confirmation modal shown when the player presses @q@
 --   or @Esc@ in normal mode. Prevents fat-fingered quits given
 --   that @q@ (Quit) and @Q@ (Quest Log) are one shift-key apart.
-drawQuitConfirmModal :: Widget ()
+drawQuitConfirmModal :: Widget Name
 drawQuitConfirmModal =
   centerLayer
     $ borderWithLabel (str " Quit? ")
@@ -397,7 +414,7 @@ drawQuitConfirmModal =
 --   bottom hint area instead of a second centered modal so the
 --   underlying slot list stays on-screen and the player can see
 --   what they're about to overwrite.
-drawSaveMenuModal :: SaveMenu -> Widget ()
+drawSaveMenuModal :: SaveMenu -> Widget Name
 drawSaveMenuModal sm =
   let title = case smMode sm of
         SaveMode -> " Save Game "
@@ -413,7 +430,7 @@ drawSaveMenuModal sm =
       body = vBox $ rows ++ [str "", hint]
   in centerLayer $ borderWithLabel (str title) $ padAll 1 body
   where
-    drawRow :: SaveMenuMode -> Int -> Int -> SaveMenuEntry -> Widget ()
+    drawRow :: SaveMenuMode -> Int -> Int -> SaveMenuEntry -> Widget Name
     drawRow mode cursor idx entry =
       let letter  = toEnum (fromEnum 'a' + idx) :: Char
           slotLbl = sseSlotLabel entry
@@ -442,7 +459,7 @@ drawSaveMenuModal sm =
 --   wide terminal sizes. Disabled options (Continue / Load with no
 --   saves present) are dimmed via 'launchDisabledAttr' so the
 --   player can still see them but knows they won't respond.
-drawLaunchMenu :: GameState -> LaunchMenu -> Widget ()
+drawLaunchMenu :: GameState -> LaunchMenu -> Widget Name
 drawLaunchMenu _ lm =
   centerLayer
     $ borderWithLabel (str " Dungeon Haskell ")
@@ -491,7 +508,7 @@ drawLaunchMenu _ lm =
 --   Freezes the game (gameplay input is ignored while gsVictory is
 --   true) so the only thing the player can do is quit. The framing
 --   matches the quit-confirmation modal so the key hint lines up.
-drawVictoryModal :: Widget ()
+drawVictoryModal :: Widget Name
 drawVictoryModal =
   centerLayer
     $ borderWithLabel (str " Victory! ")
@@ -505,13 +522,32 @@ drawVictoryModal =
         ]
 
 -- | A reference sheet for every key binding, modal, and slash
---   command the game currently understands. Opened with @?@ and
---   closed with any key. Mirrors the organization of the three
---   input layers (normal, modal, prompt) so the player can find
---   what they want by context rather than by alphabetical order.
-drawHelpModal :: Widget ()
-drawHelpModal =
+--   command the game currently understands. Opened with @?@, scrolled
+--   with arrow keys / @j@ / @k@ / PgUp / PgDn / Home / End, and
+--   closed with @Esc@ or @?@.
+--
+--   The modal is sized as a percentage of the terminal and the body
+--   sits inside a 'viewport' so it stays usable on terminals that
+--   aren't tall enough to show every line at once. When cheats are
+--   disabled the "Wizard commands" section is dropped entirely so a
+--   clean-run player is never told those commands exist.
+drawHelpModal :: Bool -> Widget Name
+drawHelpModal wizardEnabled =
   let section title rows = (title ++ ":") : rows ++ [""]
+      wizardSection
+        | wizardEnabled =
+            section "Wizard commands (--wizard enabled)"
+              [ "  /reveal              light up the entire map"
+              , "  /heal                full HP restore"
+              , "  /kill-all            banish every monster on level"
+              , "  /teleport X Y        jump to a tile"
+              , "  /spawn KIND          spawn rat/goblin/orc next to you"
+              , "  /xp N                grant N XP"
+              , "  /descend  /ascend    force-move one floor"
+              , "  (any save written after one of these is flagged"
+              , "   and is invisible to non-wizard sessions)"
+              ]
+        | otherwise = []
       lines_ =
            section "Movement"
              [ "  arrow keys / hjkl    move 4-way"
@@ -544,20 +580,32 @@ drawHelpModal =
              [ "  a-z                  use / equip the item"
              , "  Esc / i              close the bag"
              ]
-        ++ section "Slash commands (wizard / debug)"
+        ++ section "Slash commands"
              [ "  /                    open the command prompt"
-             , "  /reveal              light up the entire map"
-             , "  /heal                full HP restore"
-             , "  /kill-all            banish every monster on level"
-             , "  /teleport X Y        jump to a tile"
-             , "  /spawn KIND          spawn rat/goblin/orc next to you"
-             , "  /xp N                grant N XP"
-             , "  /descend  /ascend    force-move one floor"
+             , "  /help                this help screen"
+             , "  /quit                open quit confirmation"
+             , "  /inv  /inventory     open the bag"
+             , "  /quests /questlog    open the quest log"
+             , "  /wait  /rest         pass a turn"
+             , "  /save  /load         open save / load picker"
+             , "  /quicksave  /qs      write the quicksave slot"
+             , "  /quickload  /ql      read the quicksave slot"
              ]
+        ++ wizardSection
         ++ section "Quitting"
              [ "  q / Esc              open quit confirmation"
              , "  y                    confirm and exit the run"
              , "  n / Esc / any        cancel and keep playing"
              ]
-        ++ [ "(press any key to close)" ]
-  in centerLayer $ borderWithLabel (str " Help ") $ padAll 1 $ vBox (map str lines_)
+      body = viewport HelpViewport Vertical $ vBox (map str lines_)
+      footer = str "↑/↓ jk scroll   PgUp/PgDn page   Home/End   Esc close"
+  in centerLayer
+       $ hLimit 64
+       $ vLimitPercent 85
+       $ borderWithLabel (str " Help ")
+       $ padLeftRight 1
+       $ vBox
+           [ body
+           , hBorder
+           , footer
+           ]

@@ -95,3 +95,57 @@ spec = describe "Game.Logic.Command.parseCommand" $ do
 
     it "rejects an unknown command with a helpful message" $
       parseCommand "fly" `shouldBe` Left "unknown command: fly"
+
+  -- ----------------------------------------------------------------
+  -- Safe UI commands — always available, even without --wizard.
+  -- ----------------------------------------------------------------
+
+  describe "safe UI commands" $ do
+    it "parses /help"       $ parseCommand "/help"      `shouldBe` Right CmdHelp
+    it "parses /quit"       $ parseCommand "/quit"      `shouldBe` Right CmdQuit
+    it "parses /exit as quit" $ parseCommand "/exit"    `shouldBe` Right CmdQuit
+    it "parses /inv"        $ parseCommand "/inv"       `shouldBe` Right CmdInventory
+    it "parses /inventory"  $ parseCommand "/inventory" `shouldBe` Right CmdInventory
+    it "parses /quests"     $ parseCommand "/quests"    `shouldBe` Right CmdQuests
+    it "parses /questlog"   $ parseCommand "/questlog"  `shouldBe` Right CmdQuests
+    it "parses /wait"       $ parseCommand "/wait"      `shouldBe` Right CmdWait
+    it "parses /rest as wait" $ parseCommand "/rest"    `shouldBe` Right CmdWait
+    it "parses /save"       $ parseCommand "/save"      `shouldBe` Right CmdSave
+    it "parses /load"       $ parseCommand "/load"      `shouldBe` Right CmdLoad
+    it "parses /quicksave"  $ parseCommand "/quicksave" `shouldBe` Right CmdQuicksave
+    it "parses /qs alias"   $ parseCommand "/qs"        `shouldBe` Right CmdQuicksave
+    it "parses /quickload"  $ parseCommand "/quickload" `shouldBe` Right CmdQuickload
+    it "parses /ql alias"   $ parseCommand "/ql"        `shouldBe` Right CmdQuickload
+
+    it "is case-insensitive on safe verbs" $
+      parseCommand "/HELP" `shouldBe` Right CmdHelp
+
+    it "rejects stray args on safe nullary commands" $
+      parseCommand "/help me" `shouldBe`
+        Left "command takes no arguments, got: me"
+
+  -- ----------------------------------------------------------------
+  -- Cheat classification — drives the capability check in Main.
+  -- ----------------------------------------------------------------
+
+  describe "isCheatCommand" $ do
+    it "tags all wizard commands as cheats" $ do
+      isCheatCommand CmdReveal                   `shouldBe` True
+      isCheatCommand CmdHeal                     `shouldBe` True
+      isCheatCommand CmdKillAll                  `shouldBe` True
+      isCheatCommand (CmdTeleport (V2 0 0))      `shouldBe` True
+      isCheatCommand (CmdSpawn Rat)              `shouldBe` True
+      isCheatCommand (CmdXP 1)                   `shouldBe` True
+      isCheatCommand CmdDescend                  `shouldBe` True
+      isCheatCommand CmdAscend                   `shouldBe` True
+
+    it "tags all safe UI commands as non-cheats" $ do
+      isCheatCommand CmdHelp       `shouldBe` False
+      isCheatCommand CmdQuit       `shouldBe` False
+      isCheatCommand CmdInventory  `shouldBe` False
+      isCheatCommand CmdQuests     `shouldBe` False
+      isCheatCommand CmdWait       `shouldBe` False
+      isCheatCommand CmdSave       `shouldBe` False
+      isCheatCommand CmdLoad       `shouldBe` False
+      isCheatCommand CmdQuicksave  `shouldBe` False
+      isCheatCommand CmdQuickload  `shouldBe` False

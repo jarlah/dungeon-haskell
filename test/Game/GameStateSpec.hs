@@ -67,6 +67,7 @@ mkFixture seed ppos pstats monsters = GameState
   , gsRoomDesc        = Nothing
   , gsRoomDescVisible = False
   , gsAwaitingDirection = Nothing
+  , gsCheatsUsed        = False
   }
 
 -- | Player stats strong enough to one-shot anything normal.
@@ -544,6 +545,43 @@ spec = describe "Game.GameState.applyAction / event emission" $ do
         gsPlayerPos gs' `shouldBe` V2 3 3
         gsMessages  gs' `shouldBe` ["hello", "world"]
       Left e -> expectationFailure ("decode failed: " ++ show e)
+
+  -- ----------------------------------------------------------------
+  -- Wizard / cheat-mode split.
+  --
+  -- 'applyCommand' must stamp 'gsCheatsUsed' the moment any wizard
+  -- command runs, so a save written after the command can be
+  -- reliably distinguished from a clean run. The stamp is one-way
+  -- and survives a save/load round trip.
+  -- ----------------------------------------------------------------
+
+  it "gsCheatsUsed defaults to False on a fresh fixture" $ do
+    let gs = mkFixture 1 (V2 2 2) overpoweredPlayer []
+    gsCheatsUsed gs `shouldBe` False
+
+  it "applyCommand CmdHeal flips gsCheatsUsed to True" $ do
+    let gs  = (mkFixture 1 (V2 2 2) overpoweredPlayer [])
+                { gsPlayerStats = overpoweredPlayer { sHP = 1 } }
+        gs' = applyCommand CmdHeal gs
+    gsCheatsUsed gs' `shouldBe` True
+
+  it "applyCommand CmdReveal flips gsCheatsUsed to True" $ do
+    let gs  = mkFixture 1 (V2 2 2) overpoweredPlayer []
+        gs' = applyCommand CmdReveal gs
+    gsCheatsUsed gs' `shouldBe` True
+
+  it "gsCheatsUsed, once True, survives an encode/decode round-trip" $ do
+    let gs0 = (mkFixture 1 (V2 2 2) overpoweredPlayer [])
+                { gsCheatsUsed = True }
+    case decodeSave (encodeSave gs0) of
+      Right gs' -> gsCheatsUsed gs' `shouldBe` True
+      Left e    -> expectationFailure ("decode failed: " ++ show e)
+
+  it "gsCheatsUsed = False round-trips as False" $ do
+    let gs0 = mkFixture 1 (V2 2 2) overpoweredPlayer []
+    case decodeSave (encodeSave gs0) of
+      Right gs' -> gsCheatsUsed gs' `shouldBe` False
+      Left e    -> expectationFailure ("decode failed: " ++ show e)
 
 -- | Build a test NPC with two starter offers, placed at the
 --   given position.

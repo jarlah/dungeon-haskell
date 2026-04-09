@@ -48,10 +48,16 @@ tests.
   six-slot save picker, and a launch menu with *Continue* (loads
   the most recent save). Save files are compact binary with a
   magic+version header so casual editing is deliberately hard.
-- **Wizard console.** A slash-command prompt (`/`) for debugging:
-  reveal the map, heal, teleport, spawn monsters, jump floors,
-  grant XP. Nice for iterating on balance without replaying from
-  scratch.
+- **Slash-command prompt.** Press `/` to open a prompt that accepts
+  two kinds of commands. *Safe* commands — `/help`, `/save`,
+  `/load`, `/quicksave`, `/quickload`, `/wait`, `/inv`, `/quests`,
+  `/quit` — are always available and just drive the existing UI.
+  *Wizard* commands — `/reveal`, `/heal`, `/kill-all`, `/teleport`,
+  `/spawn`, `/xp`, `/descend`, `/ascend` — are only accepted when
+  the game is launched with `--wizard`. Any save written after a
+  wizard command has been used is flagged and is invisible to
+  non-wizard sessions, so a clean run can't be contaminated by a
+  hacked one.
 
 ## Building
 
