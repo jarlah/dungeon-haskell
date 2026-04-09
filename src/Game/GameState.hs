@@ -47,23 +47,24 @@ import System.Random (StdGen, mkStdGen, randomR)
 
 import Game.Save.Types (SaveMetadata)
 import Game.Types
-import qualified Game.Logic.Chest as Chest
 import Game.Logic.Chest (Chest(..), ChestState(..), chestRespawnTurns)
-import Game.Logic.Ranged (RayOutcome(..), arrowRange, walkRay)
-import qualified Game.Logic.Combat as C
 import Game.Logic.Combat (Damage(..))
 import Game.Logic.Command (Command(..), isCheatCommand)
+import qualified Game.Logic.Chest as Chest
+import qualified Game.Logic.Combat as C
 import qualified Game.Logic.Dungeon as D
 import qualified Game.Logic.FOV as FOV
 import qualified Game.Logic.Inventory as Inv
 import qualified Game.Logic.Loot as Loot
-import Game.Logic.MonsterAI (MonsterIntent(..), monsterIntent)
+import qualified Game.Logic.Ranged as Ranged
 import qualified Game.Logic.Movement as M
 import qualified Game.Logic.Progression as P
+import Game.Logic.MonsterAI (MonsterIntent(..), monsterIntent)
 import Game.Logic.Quest
   ( Quest(..), QuestEvent(..), QuestGoal(..), QuestStatus(..)
   , advanceAll, isReady, mkQuest
   )
+import Data.Maybe (isJust)
 
 -- | Pure snapshot of the whole game world.
 data GameState = GameState
@@ -1382,58 +1383,25 @@ playerAttack gs i m =
 --        kill/loot/victory pipeline 'playerAttack' uses.
 --     4. On 'RayBlocked' / 'RayDropped', just logs a message.
 fireArrow :: Dir -> GameState -> GameState
-fireArrow dir gs
-  | invWeapon (gsInventory gs) /= Just Bow =
-      gs { gsMessages =
-             "You don't have a bow equipped." : gsMessages gs
-         }
-  | invArrows (gsInventory gs) <= 0 =
-      gs { gsMessages =
-             "You have no arrows." : gsMessages gs
-         }
-  | otherwise =
-      let start   = gsPlayerPos gs
-          step    = dirToOffset dir
-          path    = [ start + fmap (* k) step | k <- [1 .. arrowRange] ]
-          inv     = gsInventory gs
-          inv'    = inv { invArrows = invArrows inv - 1 }
-          gsArrow = gs { gsInventory = inv' }
-          npcHit p   = case npcAt   p (gsNPCs     gs) of
-                         Just _  -> True
-                         Nothing -> False
-          chestHit p = case chestAt p (gsChests   gs) of
-                         Just _  -> True
-                         Nothing -> False
-          monsterL p = monsterAt p (gsMonsters gs)
-          outcome    = walkRay (gsLevel gs) monsterL npcHit chestHit path
-      in case outcome of
-           RayHitMonster i m ->
-             let playerBase = gsPlayerStats gsArrow
-                 rangedAtk  = playerBase
-                   { sAttack = sAttack playerBase + Inv.bowRangedBonus }
-                 (roll,     gen1) = randomR (1 :: Int, 20)  (gsRng gsArrow)
-                 (critRoll, gen2) = randomR (1 :: Int, 100) gen1
-                 result = C.resolveWith roll critRoll rangedAtk (mStats m)
-                 verb   = case result of
-                   C.Miss          -> "glances off"
-                   C.Hit _         -> "strikes"
-                   C.CriticalHit _ -> "tears through"
-                   C.Kill _        -> "fells"
-                 msg    = "Your arrow " ++ verb ++ " the "
-                       ++ monsterName (mKind m) ++ "."
-                 gs1    = gsArrow { gsRng = gen2 }
-             in applyHitResult gs1 i m result [msg]
-           RayBlocked tail_ ->
-             gsArrow
-               { gsMessages =
-                   ("Your arrow " ++ tail_ ++ ".") : gsMessages gsArrow
-               }
-           RayDropped ->
-             gsArrow
-               { gsMessages =
-                   "Your arrow sails away and is lost."
-                   : gsMessages gsArrow
-               }
+fireArrow dir gs =
+  let npcHit   p = isJust (npcAt   p (gsNPCs   gs))
+      chestHit p = isJust (chestAt p (gsChests gs))
+      monsterL p = monsterAt p (gsMonsters gs)
+  in case Ranged.resolveShot dir (gsLevel gs) (gsPlayerPos gs)
+            monsterL npcHit chestHit
+            (gsInventory gs) (gsPlayerStats gs) (gsRng gs) of
+        Ranged.ShotRefused msg ->
+          pushMsg msg gs
+        Ranged.ShotMissed msg ->
+          pushMsg msg (decArrow gs)
+        Ranged.ShotLanded i m result msg gen' ->
+          let gs' = (decArrow gs) { gsRng = gen' }
+          in applyHitResult gs' i m result [msg]
+  where
+    pushMsg m s = s { gsMessages = m : gsMessages s }
+    decArrow s  =
+      let inv = gsInventory s
+      in s { gsInventory = inv { invArrows = invArrows inv - 1 } }
 
 -- | Shared post-resolution pipeline for any player-initiated hit
 --   on a monster, whether from melee ('playerAttack') or ranged
