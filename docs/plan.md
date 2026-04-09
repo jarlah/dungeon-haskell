@@ -1089,6 +1089,185 @@ surface used by `Main.hs` and `GameState.hs`.
 
 ---
 
+### Milestone 15: Doors, Keys, Treasure Rooms, and Traps
+
+**Goal:** Turn the BSP-generated dungeons into properly explorable spaces.
+Rooms become discrete spaces separated by doors; some doors are locked
+and require keys found elsewhere on the floor; a marked treasure room
+per level rewards the detour with denser loot; and hidden traps scattered
+on floor tiles punish careless movement. The `Door` tile already exists
+in `Game.Types` and is wired through walkability, FOV, rendering, and the
+save codec — the generator just never emits it. This milestone closes
+that gap and builds gameplay on top of it.
+
+The guiding principle is **generator-first**: doors, keys, treasure, and
+traps are all placed deterministically from the level's `StdGen` during
+`generateLevel`, so the entire level state still round-trips through the
+save codec and there is no hidden runtime state.
+
+---
+
+#### Step 1 — Place doors in the BSP generator
+
+Today `Game.Logic.Dungeon` carves rooms and connects them with L-shaped
+corridors but only ever emits `Floor` / `Wall` / `StairsDown` / `StairsUp`.
+Wire the existing `Door` tile into the generator.
+
+| Task | Detail |
+|------|--------|
+| Identify door sites | After corridors are stamped, walk each room's perimeter and find tiles where a corridor floor meets the room edge. Those junction tiles become door candidates |
+| Roll door state | ~70% `Door Open`, ~30% `Door Closed` (Step 2 adds `Locked`); use the level's `StdGen` so placement is deterministic |
+| Skip degenerate rooms | Tiny rooms (< 3x3) and the room containing spawn or stairs-up get no closed doors so the player is never softlocked on arrival |
+| Make doors walk-through-once | Bumping into a `Door Closed` turns it into `Door Open` (no key required); movement cost is the same as walking |
+
+Existing infrastructure that does **not** need to change:
+- `isWalkable (Door Open/Closed)` in `Game.Types` — already correct
+- `transparent` in `Game.Logic.FOV` — already returns `False` for `Closed`
+- `Game.Render` — already draws `/` and `+`
+- `Binary DoorState` in `Game.Save` — already derived
+
+**Acceptance:** A generated level contains visible doors (`/` and `+`)
+where corridors meet rooms; the player can bump a `+` to turn it into a
+`/`; closed doors block FOV until opened; the level round-trips through
+`encodeSave`/`decodeSave` unchanged.
+
+---
+
+#### Step 2 — Locked doors and keys
+
+Extend `DoorState` so some doors need a matching key:
+
+```haskell
+-- Game.Types
+data DoorState = Open | Closed | Locked !KeyId
+  deriving (Eq, Show)
+
+newtype KeyId = KeyId Int
+  deriving (Eq, Ord, Show)
+```
+
+Add a new item kind for keys:
+
+```haskell
+data Item
+  = IPotion !Potion
+  | IWeapon !Weapon
+  | IArmor  !Armor
+  | IKey    !KeyId
+```
+
+| Task | Detail |
+|------|--------|
+| `isWalkable (Door (Locked _))` → `False` | Existing `canWalk` in `Movement` already gates on `isWalkable`; no caller changes needed |
+| Bump-to-open for locked doors | `Game.Logic.Movement` (or the `handleBump` site in `GameState`) checks the inventory for a matching `IKey` when the bumped tile is `Door (Locked k)`; on match, the key is consumed and the door becomes `Door Open`; on miss, emit an `EvDoorLocked` event and keep the player in place |
+| Key placement | The generator picks a floor tile inside a *different* room from the locked door and stamps the matching `IKey` onto `dlItems` (or whatever field carries floor items) |
+| Rendering | New glyph for `Locked` (e.g. `&` in yellow); keys render as `k` |
+| Messages | `"The door is locked."` / `"You unlock the door with the iron key."` via the existing message log |
+| Save codec | `KeyId` gets a `Binary` instance alongside the other `DoorState` variants; existing codec version bumps to `DHSAVE04` |
+
+**Acceptance:** A locked door blocks movement and FOV; dropping the
+matching key into the inventory and bumping the door opens it and
+consumes the key; a save made on a level with locked doors round-trips.
+
+---
+
+#### Step 3 — Treasure rooms
+
+One room per level is designated a **treasure room**: it's locked behind
+a `Door (Locked k)` and stocked with 2–4 extra items from a higher-tier
+loot pool than the floor normally rolls. The matching key is placed
+somewhere on the same level.
+
+| Task | Detail |
+|------|--------|
+| Select treasure room | During `generateLevel`, after room placement but before door placement, pick one room: prefer small rooms far from the stairs-up tile (Chebyshev distance) so it feels like a detour, not a trivial side-step |
+| Lock its door | Whichever doorway connects the treasure room to the rest of the map is forced to `Locked k` for a freshly-minted `KeyId` |
+| Stock with loot | Roll 2–4 items from `Logic.Loot` at one tier above the normal depth (e.g. depth 3 rolls from the depth 4 table); guarantee at least one weapon or armor, not just potions |
+| Record which room is the treasure room | Add `dlTreasureRoom :: !(Maybe Int)` (index into `dlRooms`) to `DungeonLevel` so M14's room-description hook can tag it and so the boss floor can opt out |
+| Boss floor skip | Depth 10 has its own fixed geometry; no treasure room is added there |
+
+**Acceptance:** On a fresh depth 1 floor, exactly one room is behind a
+locked door and contains a dense item cluster; the key is findable
+elsewhere on the same floor (not behind the same door it unlocks);
+`listSaves` metadata still reports the correct depth.
+
+---
+
+#### Step 4 — Traps
+
+Hidden floor hazards that trigger when the player (not a monster) steps
+onto them.
+
+```haskell
+-- Game.Types
+data TrapKind = Spikes | Dart | Alarm
+  deriving (Eq, Show, Enum, Bounded)
+
+data Trap = Trap
+  { tPos    :: !Pos
+  , tKind   :: !TrapKind
+  , tHidden :: !Bool   -- True until triggered or revealed
+  } deriving (Eq, Show)
+```
+
+Add `dlTraps :: ![Trap]` to `DungeonLevel`.
+
+| Kind | Effect |
+|------|--------|
+| `Spikes` | 1d4 damage, emits `EvPlayerHurt`, becomes visible |
+| `Dart` | 1d3 damage + `"A dart flies out of the wall!"`, becomes visible |
+| `Alarm` | No damage, but spawns 1–2 extra monsters of the current floor's table adjacent to the player, becomes visible |
+
+| Task | Detail |
+|------|--------|
+| Placement | Generator rolls `3 + depth` traps on random floor tiles that are **not** in the spawn room, not on stairs, and not inside the treasure room (traps and treasure are separate rewards for separate detours) |
+| Trigger site | In the movement pipeline, after the player successfully moves onto a tile, check `dlTraps` for a hidden trap at that position; if found, resolve the effect, set `tHidden = False`, and emit the appropriate `GameEvent` |
+| Rendering | Hidden traps render as the underlying floor; visible traps render as `^` in red |
+| FOV interaction | Traps are not tiles, so they do not block sight; the visible/hidden flag is purely for rendering |
+| Monsters don't trigger traps | To keep monster AI pure and avoid pathing into a cleared trap being suspicious, only the player triggers traps in this milestone — a later pass can extend this |
+| Save codec | `Trap` and `TrapKind` get `Binary` instances; codec version bumps are amortized with Step 2 |
+
+**Acceptance:** Stepping on a hidden trap deals damage (or spawns
+monsters), reveals the trap glyph, and writes the correct event to
+`gsEvents`; reloaded levels remember which traps have been triggered.
+
+---
+
+#### Step 5 — Tests
+
+| Module | Tests |
+|--------|-------|
+| `Game.Logic.DungeonSpec` | `prop_everyLevelHasAtLeastOneDoor` (except boss floor); `prop_treasureRoomExistsBelowBoss`; `prop_treasureRoomKeyIsReachable` (flood-fill from spawn, check the key is reachable without passing through the locked door); `prop_noTrapOnStairs`; `prop_noTrapInSpawnRoom` |
+| `Game.Logic.MovementSpec` | bumping a closed door opens it and does not move the player; bumping a locked door without the key fails; bumping a locked door with the key consumes the key and opens the door |
+| `Game.Logic.FOVSpec` | `prop_closedDoorBlocksFOV` (already implicit but make it explicit); open doors do not block FOV |
+| `Game.GameStateSpec` | `applyAction Move` onto a hidden trap tile deals the expected damage and emits `EvPlayerHurt`; a revealed trap does not re-trigger on the next step |
+| `Game.SaveSpec` | a level with a `Locked` door, a key in the inventory, and a revealed trap round-trips through `encodeSave`/`decodeSave`; forcing `dlTreasureRoom` and `dlTraps` fields from a decoded save to catch lazy-field regressions |
+
+---
+
+#### Suggested Implementation Order
+
+1. **Place unlocked doors** (Step 1 only) — smallest possible diff that makes the README true; validates that the existing Door wiring works
+2. **Traps** (Step 4) — orthogonal to keys/treasure, easy to add incrementally
+3. **Locked doors + keys** (Step 2) — enables Step 3
+4. **Treasure rooms** (Step 3) — composes keys + loot, lands the headline feature
+5. **Save codec bump** — single version bump at the end (`DHSAVE03` → `DHSAVE04`) covering `KeyId`, `Trap`, and the new `DungeonLevel` fields
+6. **Tests** — added alongside each step, not deferred
+
+---
+
+#### Risks & Mitigations
+
+| Risk | Mitigation |
+|------|-----------|
+| Locked treasure room is unreachable because the key is itself behind the locked door | Generator picks the key tile *after* flood-filling from spawn with the treasure door treated as a wall — the key must land in the reachable set |
+| A closed door blocks the player from ever reaching the stairs | Spawn room and the room containing `StairsUp` never get closed doors on their outgoing corridors; a flood-fill sanity check in the generator rejects any layout where stairs are unreachable from spawn assuming all non-locked doors open |
+| Traps make the early floors unfair | Scale trap count and damage with depth; depth 1 gets 3 traps max with only `Spikes`; `Alarm` and `Dart` unlock at depth 3+ |
+| Save format churn | Land Steps 2–4 together behind a single `DHSAVE04` bump; pre-M15 saves refuse to load with `SaveWrongVersion`, matching the existing behaviour |
+| HPC regression from the new fields | Every new `DungeonLevel` / `Trap` field gets at least one test that forces it (same pattern as the SaveMetadata fix in the M14 follow-ups) |
+
+---
+
 ## Testing Strategy
 
 ### Property-Based Tests (QuickCheck)
