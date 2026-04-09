@@ -47,6 +47,7 @@ library
     Game.UI.Types
     Game.UI.SaveMenu
     Game.UI.Launch
+    Game.UI.Modals
     Game.Input
     Game.Audio
     Game.Save.Types
