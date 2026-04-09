@@ -23,6 +23,8 @@ The entire game logic layer is **pure Haskell** — no IO, no Apecs, no Brick. T
 | Testing | `hspec`, `QuickCheck` | Unit + property-based tests |
 | Randomness | `MonadRandom` | Procedural generation, combat rolls |
 | Containers | `containers`, `vector` | Maps, sets, dungeon grids |
+| Configuration | `yaml` | `config.yaml` parsing via Data.Yaml |
+| HTTP | `http-tower-hs` | Resilient HTTP client (retries, timeouts, circuit-breaking) for AI features |
 
 ### Why Brick over SDL2
 
@@ -811,6 +813,282 @@ Content stretch goals:
 
 ---
 
+### Milestone 14: AI-Powered Content Generation
+
+**Goal:** Integrate LLM-based content generation into the dungeon crawler
+to dynamically produce quests, level flavor, and NPC behaviour. All LLM calls
+go through **http-tower-hs** which provides resilient HTTP middleware (retries,
+timeouts, circuit-breaking) so the game degrades gracefully when the AI backend
+is unavailable.
+
+The guiding principle is **AI-optional**: every feature must have a sensible
+hardcoded fallback so the game never blocks on a network call.
+
+#### Configuration
+
+All game configuration lives in a `config.yaml` file, loaded at startup via
+the `yaml` (Data.Yaml) package. The game searches for the file in this order:
+
+1. Path passed via `--config` CLI flag (if provided)
+2. `./config.yaml` (current working directory)
+3. `$XDG_CONFIG_HOME/dungeon-haskell/config.yaml`
+
+If no config file is found, the game starts with sensible defaults (AI
+features disabled, all other settings at their default values).
+
+```yaml
+# config.yaml
+ai:
+  enabled: true
+  endpoint: "http://localhost:11434/api/generate"   # Ollama default
+  api_key: ""                                        # empty = no auth header
+  model: "mistral"
+  timeout_seconds: 15
+  max_retries: 3
+
+audio:
+  music_volume: 0.7
+  sfx_volume: 1.0
+```
+
+```haskell
+-- src/Game/Config.hs
+data GameConfig = GameConfig
+  { gcAI    :: !AIConfig
+  , gcAudio :: !AudioConfig
+  } deriving (Eq, Show, Generic)
+
+data AIConfig = AIConfig
+  { aiEnabled  :: !Bool
+  , aiEndpoint :: !Text
+  , aiApiKey   :: !Text
+  , aiModel    :: !Text
+  , aiTimeout  :: !Int      -- seconds
+  , aiRetries  :: !Int
+  } deriving (Eq, Show, Generic)
+
+instance FromJSON GameConfig
+instance FromJSON AIConfig
+
+loadConfig :: Maybe FilePath -> IO GameConfig
+-- tries CLI path, then ./config.yaml, then XDG, then returns defaults
+```
+
+Ship a `config.yaml.example` in the repo root documenting all options.
+
+---
+
+#### Step 1 — Add http-tower-hs, YAML & JSON dependencies
+
+| Task | Detail |
+|------|--------|
+| Add `http-tower-hs` to `dungeon-haskell.cabal` dependencies | Use the published Hackage version (`http-tower-hs ^>= 0.3.1`); add to `stack.yaml` `extra-deps` only if not yet on the current Stackage resolver |
+| Add library deps to `dungeon-haskell.cabal` | `http-tower-hs`, `aeson`, `yaml`, `text`, `http-client`, `http-client-tls`, `bytestring` |
+| Create `src/Game/Config.hs` | `GameConfig` / `AIConfig` types with `FromJSON` instances; `loadConfig` function (see above) |
+| Create `src/Game/AI/Client.hs` | Thin wrapper that configures http-tower-hs with retry policy (3 attempts, exponential backoff), 5 s connect / 15 s response timeout, and a circuit breaker (5 failures → 30 s open) |
+| Wire config into startup | `Main.hs` calls `loadConfig`, stores result in a top-level `AppEnv` passed through `IO` |
+
+**Acceptance:** `stack build` succeeds; a manual `cabal repl` call to the client
+module can round-trip a prompt to a local Ollama or OpenAI-compatible endpoint.
+
+---
+
+#### Step 2 — Dynamic Quest Generation
+
+##### 2.1 Prompt design
+
+Create `src/Game/AI/Prompts.hs` with a quest-generation prompt template:
+
+```
+You are a quest designer for a dungeon crawler.
+The player is on depth {depth}, level {level}, has killed {kills} monsters.
+Generate a quest as JSON:
+{
+  "name": "<short title>",
+  "description": "<1-2 sentences>",
+  "goal": "kill <N> <monster>" | "reach depth <D>" | "kill boss",
+  "xp_reward": <int>
+}
+Respond with ONLY the JSON object.
+```
+
+##### 2.2 Quest parsing
+
+In `src/Game/AI/QuestGen.hs`:
+
+- `generateQuest :: AIConfig -> GameState -> IO (Maybe Quest)`
+- Parse the JSON response into the existing `Quest` / `QuestGoal` types.
+- On parse failure or timeout → return `Nothing` (caller falls back to
+  hardcoded quest pool).
+
+##### 2.3 Integration point
+
+In `Game.Logic.Dungeon.generateLevel` (or the NPC-placement path):
+
+- When placing the Quest Master NPC on depth 1, attempt to generate 1-2
+  AI quests alongside the existing 3 hardcoded ones.
+- On deeper floors with NPCs, generate floor-appropriate quests.
+
+**Acceptance:** Talking to the Quest Master shows at least one AI-generated
+quest when the LLM endpoint is reachable; shows only hardcoded quests when
+it is not.
+
+---
+
+#### Step 3 — NPC Greeting Behaviour
+
+##### 3.1 Prompt design
+
+Add to `Prompts.hs`:
+
+```
+You are an NPC in a dark dungeon. Your name is {name}. You are a {role}.
+The adventurer approaches you on dungeon depth {depth}.
+Greet them in 1-2 short sentences. Be atmospheric and in-character.
+Respond with ONLY the greeting text, no quotes.
+```
+
+##### 3.2 Greeting generation
+
+In `src/Game/AI/NPCBehaviour.hs`:
+
+- `generateGreeting :: AIConfig -> NPC -> Int -> IO (Maybe Text)`
+  (NPC, current depth → optional greeting)
+- Cache the generated greeting in the NPC record so we only call the LLM
+  once per NPC per game session.
+- Fallback: use the existing hardcoded `npcGreeting` field.
+
+##### 3.3 NPC record changes
+
+Extend `NPC` in `Game.Types`:
+
+```haskell
+data NPC = NPC
+  { npcName      :: Text
+  , npcPos       :: Pos
+  , npcGreeting  :: String          -- hardcoded fallback
+  , npcAIGreet   :: Maybe String    -- cached AI greeting (Nothing = not yet fetched)
+  , npcRole      :: NPCRole         -- new: Merchant | QuestGiver | Hermit | ...
+  , npcQuests    :: [Quest]
+  }
+```
+
+Display logic: prefer `npcAIGreet` when `Just`, else `npcGreeting`.
+
+**Acceptance:** An NPC greets the player with a unique AI-generated line that
+varies between game sessions. Falls back to the static greeting when offline.
+
+---
+
+#### Step 4 — Level Content / Room Descriptions
+
+##### 4.1 Prompt design
+
+```
+Describe a dungeon room in 1 short atmospheric sentence.
+Room size: {w}x{h}. Depth: {depth}. Monsters present: {monsters}.
+Respond with ONLY the description.
+```
+
+##### 4.2 Room description generation
+
+In `src/Game/AI/LevelContent.hs`:
+
+- `describeRoom :: AIConfig -> Room -> Int -> [MonsterKind] -> IO (Maybe Text)`
+- Generate descriptions for a batch of rooms on level entry (fire requests
+  concurrently via `async` if http-tower-hs supports it, otherwise
+  sequentially).
+- Store in a `Map RoomId Text` on `GameState`.
+
+##### 4.3 Display
+
+Show the room description in the message log when the player first enters a
+room (track visited rooms per level in a `Set RoomId`).
+
+**Acceptance:** Entering a new room prints a flavour sentence.
+Without LLM access, no description is shown (silent fallback).
+
+---
+
+#### Step 5 — Async / Non-Blocking Architecture
+
+The Brick event loop is single-threaded. LLM calls must not freeze the UI.
+
+| Approach | Detail |
+|----------|--------|
+| Background thread | On level generation or NPC interaction, fork an `IO` thread that writes the result into a `TVar` / `TChan` |
+| Brick custom event | Use `BChan` to push an `AIResponseEvent` back into the Brick event loop when the result arrives |
+| Placeholder text | While waiting, show "..." or the hardcoded fallback; replace with AI text when the event fires |
+
+New module: `src/Game/AI/Async.hs`
+
+- `requestAI :: BChan AppEvent -> AIConfig -> AIRequest -> IO ()`
+  Forks a thread, makes the http-tower-hs call, pushes result onto BChan.
+- `data AIRequest = GenQuest ... | GenGreeting ... | GenRoomDesc ...`
+- `data AIResponse = QuestResult ... | GreetingResult ... | RoomDescResult ...`
+
+Add `AIResponseEvent AIResponse` to the app event type in `Main.hs`.
+
+**Acceptance:** The game never freezes during LLM calls. A slow/dead endpoint
+results in the fallback content appearing with no visible delay.
+
+---
+
+#### Step 6 — Testing
+
+| Task | Detail |
+|------|--------|
+| `config.yaml.example` | Ship in repo root documenting all config options with comments |
+| Ollama instructions | Add a section in README for running a local model (e.g. `ollama run mistral`) for free local testing |
+| Mock client | `src/Game/AI/Mock.hs` — returns canned responses; used when no endpoint is configured or in tests |
+| Unit tests | Parse-round-trip tests for quest JSON, greeting trimming, room description length limits |
+| Config tests | Verify `loadConfig` parses example file correctly; verify defaults when no file exists |
+| Integration test | Optional test that hits a real endpoint (gated behind a config flag) |
+
+---
+
+#### New Module Dependency Graph
+
+```
+Game.Config           -- config.yaml parsing, GameConfig / AIConfig types
+Game.AI.Client        -- http-tower-hs configuration, raw sendPrompt
+Game.AI.Prompts       -- prompt templates
+Game.AI.QuestGen      -- quest generation + JSON parsing
+Game.AI.NPCBehaviour  -- greeting generation
+Game.AI.LevelContent  -- room descriptions
+Game.AI.Async         -- non-blocking Brick integration
+Game.AI.Mock          -- canned responses for testing / offline
+```
+
+All modules under `Game.AI.*` depend on `Game.AI.Client` and `Game.Config`.
+`Game.AI.Async` depends on all the others and is the single integration
+surface used by `Main.hs` and `GameState.hs`.
+
+---
+
+#### Suggested Implementation Order
+
+1. **Config + Client** (step 1) — get config.yaml loading and a working LLM call from Haskell
+2. **NPC Greetings** (step 3) — smallest surface area, proves the pipeline
+3. **Quest Generation** (step 2) — higher value, builds on the client
+4. **Async wrapper** (step 5) — make it non-blocking before adding more calls
+5. **Room Descriptions** (step 4) — nice-to-have layer on top
+6. **Testing & polish** (step 6) — mock client, tests, README
+
+---
+
+#### Risks & Mitigations
+
+| Risk | Mitigation |
+|------|-----------|
+| http-tower-hs Hackage version lags or has breaking changes | Pin version bounds in cabal file; worst case, wrap `http-client` + `retry` manually |
+| LLM returns unparseable output | Strict JSON schema in prompt; fallback to hardcoded content on any parse error |
+| Latency ruins game feel | Async architecture (step 5); pre-generate content during level loading |
+| Cost of API calls | Support local Ollama; cache aggressively; generate in batches |
+| Save/load breaks with new fields | New fields use `Maybe` with default `Nothing` for backward compat in `Binary` instance |
+
+---
+
 ## Testing Strategy
 
 ### Property-Based Tests (QuickCheck)
@@ -1067,3 +1345,5 @@ prop_deathPenaltyLosesOneItem gen items =
   as the game grows.
 - **The pure logic layer is portable.** If you ever want a web frontend (via
   GHCJS/Miso) or SDL2 graphics, only Render.hs and Input.hs change.
+
+
