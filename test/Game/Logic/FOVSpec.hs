@@ -28,6 +28,7 @@ openRoom w h = DungeonLevel
       in if x == 0 || y == 0 || x == w - 1 || y == h - 1
            then Wall
            else Floor
+  , dlRooms  = [Room 1 1 (w - 2) (h - 2)]
   }
 
 -- | An open 11×11 room with a single wall at (5, 3). Used to
@@ -47,6 +48,7 @@ roomWithPillar =
        , dlTiles  = V.generate (w * h) $ \i ->
            let (y, x) = i `divMod` w
            in if wallTile (V2 x y) then Wall else Floor
+       , dlRooms  = [Room 1 1 (w - 2) (h - 2)]
        }
 
 spec :: Spec

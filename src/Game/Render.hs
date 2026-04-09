@@ -84,6 +84,15 @@ drawGame gs =
         , drawMessages gs
         , str "? for help    q/Esc to quit"
         ]
+      -- The room description panel sits above the base layer but
+      -- below any real modal (inventory, quest log, dialogue, ...),
+      -- so opening a modal temporarily hides it without having to
+      -- drop the cached text. When no modal is on screen and the
+      -- panel is visible *and* has content, render it — otherwise
+      -- the gameplay view is untouched.
+      withRoomPanel layers = case (gsRoomDescVisible gs, gsRoomDesc gs) of
+        (True, Just d) -> drawRoomDescPanel d : layers
+        _              -> layers
   in case gsLaunchMenu gs of
        -- Launch / title screen swallows the whole viewport so no
        -- gameplay artifacts leak through before the player picks
@@ -99,7 +108,7 @@ drawGame gs =
            | Just sm <- gsSaveMenu gs -> [drawSaveMenuModal sm, baseLayer]
            | gsQuestLogOpen gs  -> [drawQuestLogModal gs, baseLayer]
            | gsInventoryOpen gs -> [drawInventoryModal gs, baseLayer]
-           | otherwise          -> [baseLayer]
+           | otherwise          -> withRoomPanel [baseLayer]
   where
     nthMaybe n xs
       | n < 0 || n >= length xs = Nothing
@@ -327,6 +336,25 @@ drawQuestLogModal gs =
 
       body = vBox (map str lines_)
   in centerLayer $ borderWithLabel (str " Quest Log ") $ padAll 1 body
+
+-- | Small floating panel for the AI-generated room description.
+--   Positioned with 'centerLayer' like every other modal in the
+--   game, but deliberately narrower and single-sentence so it
+--   reads as flavor rather than a dialogue box. The player can
+--   walk around while it's on screen — 'handleNormalKey' binds
+--   Esc to dismiss it at the lowest priority so it doesn't
+--   shadow any other modal's Esc handling.
+drawRoomDescPanel :: String -> Widget ()
+drawRoomDescPanel desc =
+  centerLayer
+    $ hLimit 60
+    $ borderWithLabel (str " Room ")
+    $ padAll 1
+    $ vBox
+        [ strWrap desc
+        , str ""
+        , str "Esc to dismiss"
+        ]
 
 -- | A tiny confirmation modal shown when the player presses @q@
 --   or @Esc@ in normal mode. Prevents fat-fingered quits given

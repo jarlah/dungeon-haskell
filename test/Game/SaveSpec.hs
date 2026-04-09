@@ -70,8 +70,8 @@ spec = do
           expectationFailure
             ("expected SaveCorrupt, got: " ++ show other)
 
-    it "saveMagic is exactly DHSAVE02" $
-      saveMagic `shouldBe` BL8.pack "DHSAVE02"
+    it "saveMagic is exactly DHSAVE03" $
+      saveMagic `shouldBe` BL8.pack "DHSAVE03"
 
   describe "slotFileName / slotFromFileName" $ do
 

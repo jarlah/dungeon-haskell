@@ -28,6 +28,7 @@ tinyRoom = DungeonLevel
   , dlTiles  = V.generate (5 * 5) $ \i ->
       let (y, x) = i `divMod` 5
       in if x == 0 || y == 0 || x == 4 || y == 4 then Wall else Floor
+  , dlRooms  = [Room 1 1 3 3]
   }
 
 -- | Build a 'GameState' with the player at a chosen spot, given
@@ -62,6 +63,8 @@ mkFixture seed ppos pstats monsters = GameState
   , gsLevels        = mempty
   , gsSaveMenu       = Nothing
   , gsLaunchMenu     = Nothing
+  , gsRoomDesc        = Nothing
+  , gsRoomDescVisible = False
   }
 
 -- | Player stats strong enough to one-shot anything normal.

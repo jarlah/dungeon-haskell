@@ -5,6 +5,9 @@ module Game.Types
   , DoorState(..)
   , Tile(..)
   , DungeonLevel(..)
+  , Room(..)
+  , posInRoom
+  , roomIndexAt
   , tileAt
   , isWalkable
   , GameAction(..)
@@ -57,13 +60,57 @@ data DoorState = Open | Closed
 data Tile = Floor | Wall | Door DoorState | StairsDown | StairsUp
   deriving (Eq, Show)
 
--- | A single dungeon floor: tiles stored row-major.
+-- | A single dungeon floor: tiles stored row-major, plus the list
+--   of rooms the generator carved out before stamping corridors.
+--
+--   @dlRooms@ is kept alongside the tile grid because once the
+--   generator is done the room geometry is otherwise lost — the
+--   tiles don't distinguish a room floor from a corridor floor, so
+--   after-the-fact "what room is the player in?" becomes a flood
+--   fill. Storing the room list is cheap (a few rectangles) and
+--   lets downstream features — boss room detection, AI room
+--   descriptions, per-room triggers — look it up in O(n).
 data DungeonLevel = DungeonLevel
   { dlWidth  :: !Int
   , dlHeight :: !Int
   , dlTiles  :: !(Vector Tile)
   , dlDepth  :: !Int
+  , dlRooms  :: ![Room]
   } deriving (Eq, Show)
+
+-- | A rectangular room carved into the dungeon. Coordinates are the
+--   /top-left/ corner of the interior, so the room occupies
+--   @[rX, rX+rW-1] × [rY, rY+rH-1]@ inclusive.
+--
+--   Defined here (rather than only in "Game.Logic.Dungeon") so
+--   "Game.Types" can refer to it from 'DungeonLevel' without a
+--   module cycle. Game.Logic.Dungeon re-exports this type.
+data Room = Room
+  { rX :: !Int
+  , rY :: !Int
+  , rW :: !Int
+  , rH :: !Int
+  } deriving (Eq, Show)
+
+-- | Does the given position lie inside this room? Uses inclusive
+--   bounds matching 'Room's geometry.
+posInRoom :: Pos -> Room -> Bool
+posInRoom (V2 x y) r =
+     x >= rX r && x < rX r + rW r
+  && y >= rY r && y < rY r + rH r
+
+-- | Index of the first room in the list that contains the given
+--   position, or 'Nothing' if the position is in a corridor / wall /
+--   other non-room tile. The index is stable across a level
+--   (generator output order) so the AI layer can use it as a cache
+--   key without worrying about reordering.
+roomIndexAt :: [Room] -> Pos -> Maybe Int
+roomIndexAt rooms p = go 0 rooms
+  where
+    go _ []     = Nothing
+    go i (r:rs)
+      | posInRoom p r = Just i
+      | otherwise     = go (i + 1) rs
 
 -- | Look up the tile at a position, or 'Nothing' if out of bounds.
 tileAt :: DungeonLevel -> Pos -> Maybe Tile

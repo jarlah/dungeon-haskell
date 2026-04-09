@@ -17,6 +17,7 @@ testRoom = DungeonLevel
   , dlHeight = 10
   , dlDepth  = 1
   , dlTiles  = V.generate (10 * 10) mkTile
+  , dlRooms  = [Room 1 1 8 8]
   }
   where
     mkTile i =

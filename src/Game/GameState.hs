@@ -160,6 +160,19 @@ data GameState = GameState
     --   /Load/. A successful load replaces the entire 'GameState',
     --   so the loaded blob — which was saved with 'Nothing' here —
     --   carries no leftover launch state.
+  , gsRoomDesc    :: !(Maybe String)
+    -- ^ Latest LLM-generated description for the room the player
+    --   most recently walked into. 'Nothing' before the first
+    --   reply has landed, or if AI is disabled. Replaced (not
+    --   appended) when the player enters a new room so only the
+    --   /current/ room's description is on screen.
+  , gsRoomDescVisible :: !Bool
+    -- ^ 'True' iff the description panel should currently be
+    --   drawn. Set to 'True' when a new description arrives,
+    --   flipped to 'False' by pressing Escape (panel dismiss).
+    --   Independent from 'gsRoomDesc' so the player can dismiss a
+    --   description and still have it re-appear on /next/ room
+    --   entry without the old text flashing back first.
   } deriving (Show)
 
 -- | UI state for the save/load picker modal. Kept entirely in
@@ -333,6 +346,8 @@ mkGameState gen dl start monsters = recomputeVisibility GameState
   , gsLevels         = Map.empty
   , gsSaveMenu       = Nothing
   , gsLaunchMenu     = Nothing
+  , gsRoomDesc       = Nothing
+  , gsRoomDescVisible = False
   }
 
 -- | Build a quest as an un-accepted *offer*. Same as 'mkQuest' but
@@ -438,6 +453,7 @@ hardcodedRoom = DungeonLevel
   , dlHeight = 10
   , dlDepth  = 1
   , dlTiles  = V.generate (20 * 10) mkTile
+  , dlRooms  = [Room 1 1 18 8]
   }
   where
     mkTile i =
@@ -944,6 +960,13 @@ loadParked pl gs = gs
   , gsExplored     = plExplored pl
   , gsPlayerPos    = plPlayerPos pl
   , gsBossRoom     = plBossRoom pl
+  -- Any AI-generated flavor text from the floor we're leaving is
+  -- no longer relevant — drop it so the panel doesn't linger into
+  -- the new (old) floor. The process-local dedup set in the AI
+  -- runtime still remembers which rooms have been described, so
+  -- the old text is simply not re-fetched.
+  , gsRoomDesc        = Nothing
+  , gsRoomDescVisible = False
   }
 
 -- | Freshly generate the next floor and swap it in. The new level
@@ -982,6 +1005,8 @@ generateAndEnter depth gs =
               , gsPlayerPos    = start
               , gsRng          = g3
               , gsBossRoom     = Just bossRoom
+              , gsRoomDesc        = Nothing
+              , gsRoomDescVisible = False
               }
        else
          let spawnRooms     = drop 1 rooms
@@ -994,6 +1019,8 @@ generateAndEnter depth gs =
               , gsPlayerPos    = start
               , gsRng          = g2
               , gsBossRoom     = Nothing
+              , gsRoomDesc        = Nothing
+              , gsRoomDescVisible = False
               }
 
 -- | Should the boss music track be playing right now? True iff the

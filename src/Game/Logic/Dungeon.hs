@@ -1,6 +1,8 @@
 module Game.Logic.Dungeon
   ( LevelConfig(..)
   , defaultLevelConfig
+    -- Re-exported from "Game.Types" so callers can keep importing
+    -- 'Room' from the dungeon module without a second import.
   , Room(..)
   , roomCenter
   , roomsIntersect
@@ -41,13 +43,9 @@ defaultLevelConfig = LevelConfig
   , lcBossDepthRange = (9, 11)
   }
 
--- | An axis-aligned rectangular room. @(rX, rY)@ is the top-left corner.
-data Room = Room
-  { rX :: !Int
-  , rY :: !Int
-  , rW :: !Int
-  , rH :: !Int
-  } deriving (Eq, Show)
+-- 'Room' is defined in "Game.Types" so 'DungeonLevel' can carry it
+-- without a module cycle. It's re-exported from here so existing
+-- callers that @import Game.Logic.Dungeon (Room(..))@ keep working.
 
 roomCenter :: Room -> Pos
 roomCenter (Room x y w h) = V2 (x + w `div` 2) (y + h `div` 2)
@@ -143,6 +141,7 @@ generateLevel gen0 cfg =
         , dlHeight = h
         , dlDepth  = lcDepth cfg
         , dlTiles  = tiles
+        , dlRooms  = rooms
         }
   in (dl, stairsUpPos, rooms, gen2)
 

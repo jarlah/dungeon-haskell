@@ -84,5 +84,9 @@ instance Binary SaveMetadata
 --   * @DHSAVE02@ — Milestone 14. 'NPC' gained the optional
 --     'npcAIGreet' cache field, which changes the derived Binary
 --     encoding for every 'GameState' that contains an NPC list.
+--   * @DHSAVE03@ — Milestone 14 follow-ups. 'DungeonLevel' gained
+--     'dlRooms' (so room-entry detection has a stable index), and
+--     'GameState' gained 'gsRoomDesc' / 'gsRoomDescVisible' for the
+--     dismissable AI room-description panel.
 saveMagic :: BL.ByteString
-saveMagic = BL8.pack "DHSAVE02"
+saveMagic = BL8.pack "DHSAVE03"

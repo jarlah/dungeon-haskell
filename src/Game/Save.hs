@@ -34,7 +34,7 @@
 --
 --   * **Magic header.** Every save begins with the 8-byte ASCII
 --     sequence @DHSAVE\<vv\>@ (Dungeon Haskell SAVE, format version
---     \<vv\>). The current version is @DHSAVE02@. The version trails
+--     \<vv\>). The current version is @DHSAVE03@. The version trails
 --     the magic so that bumping the save format across a schema
 --     change is a single-byte patch and old saves get rejected
 --     cleanly with 'SaveWrongVersion' instead of silently decoding
@@ -95,7 +95,6 @@ import           System.Directory
 import           System.FilePath            ((</>), (<.>), takeFileName)
 
 import           Game.GameState
-import           Game.Logic.Dungeon         (Room (..))
 import           Game.Logic.Quest
 import           Game.Save.Types
 import           Game.Types

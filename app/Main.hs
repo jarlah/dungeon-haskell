@@ -6,6 +6,8 @@ import Control.Exception (bracket)
 import Control.Monad (when)
 import Control.Monad.IO.Class (liftIO)
 import Data.IORef (IORef, newIORef, atomicModifyIORef')
+import qualified Data.Set as Set
+import Data.Set (Set)
 import qualified Data.Text as T
 import qualified Graphics.Vty as V
 import qualified Graphics.Vty.CrossPlatform as VCP
@@ -17,6 +19,7 @@ import Data.Char (ord)
 import qualified Game.AI.Async  as AIAsync
 import qualified Game.AI.Client as AIClient
 import qualified Game.AI.Prompts as AIPrompts
+import qualified Game.AI.QuestGen as AIQuestGen
 import           Game.AI.Types  (AIRequest (..), AIResponse (..))
 import qualified Game.Audio as Audio
 import qualified Game.Config as Config
@@ -25,7 +28,7 @@ import Game.GameState
 import Game.Input (handleKey)
 import Game.Logic.Command (parseCommand)
 import Game.Logic.Dungeon (defaultLevelConfig)
-import Game.Logic.Quest (Quest(..), QuestStatus(..))
+import Game.Logic.Quest (Quest(..), QuestStatus(..), qName)
 import Game.Render
   ( drawGame, bossAttr, fogAttr, npcAttr
   , saveMenuCursorAttr, saveMenuEmptyAttr
@@ -33,7 +36,11 @@ import Game.Render
   )
 import qualified Game.Save as Save
 import Game.Save.Types (SaveMetadata(..))
-import Game.Types (DungeonLevel(..), GameAction(..), Inventory(..))
+import Game.Types
+  ( DungeonLevel(..), GameAction(..), Inventory(..), Stats(..)
+  , Monster(..), Room(..), monsterName, roomIndexAt
+  )
+import Linear (V2(..))
 
 -- | Runtime wiring for the AI subsystem. Bundled together so the
 --   event loop only has to close over one value and so shutdown can
@@ -62,6 +69,20 @@ data AIRuntime = AIRuntime
     -- ^ maps a live correlation token back to the (depth, npcIndex)
     --   it was fired for. Populated when a request is submitted and
     --   drained when the response lands.
+  , aiSeenFloors :: !(IORef (Set Int))
+    -- ^ set of dungeon depths we've already fired a quest-generation
+    --   request for in this process. A depth is added here the
+    --   instant the request is submitted (not when it completes), so
+    --   a failure doesn't cause an immediate re-fire every keystroke.
+    --   Bookkeeping only; the actual generated quests land on the
+    --   Quest Master's offer list via 'applyAIResponse'.
+  , aiSeenRooms  :: !(IORef (Set (Int, Int)))
+    -- ^ set of @(depth, roomIndex)@ slots we've already fired a
+    --   room-description request for. Same semantics as
+    --   'aiSeenFloors': once fired (success or failure) a room
+    --   never fires again in this process, so re-entry doesn't
+    --   re-ask the LLM. A save/load round trip resets this because
+    --   the IORef is process-local, not serialized.
   }
 
 -- | The Brick custom-event type for this app. 'AIResult' carries a
@@ -125,6 +146,15 @@ handleEvent mAudio aiRt (VtyEvent (V.EvKey key mods)) = do
   -- call unconditionally — the helper is a no-op when AI is
   -- disabled or the greeting is already cached.
   maybeFireGreeting aiRt
+  -- Same deal for per-floor quest generation: every time the
+  -- player is on a floor we haven't asked the LLM about yet,
+  -- fire one 'ReqQuest'. The helper self-dedupes via
+  -- 'aiSeenFloors' so revisiting doesn't spam the worker.
+  maybeFireQuest aiRt
+  -- And once more for room descriptions: whenever the player is
+  -- standing in a room on the current floor that we haven't
+  -- described yet, fire a 'ReqRoomDesc'. Dedup via 'aiSeenRooms'.
+  maybeFireRoomDesc aiRt
 handleEvent _ aiRt (AppEvent (AIResult resp)) =
   applyAIResponse aiRt resp
 handleEvent _ _ _ = pure ()
@@ -309,6 +339,16 @@ handleNormalKey
   -> V.Key
   -> [V.Modifier]
   -> EventM () GameState ()
+-- Esc at the top priority: if the AI room-description panel is
+-- currently drawn, dismiss it without confirming quit. This keeps
+-- Esc's usual modal-dismiss semantics working for the flavor
+-- panel. Only if the panel is not visible does Esc fall through
+-- to the generic 'Quit' mapping in 'handleKey' below.
+handleNormalKey _ _ V.KEsc _ = do
+  gs <- get
+  if gsRoomDescVisible gs
+    then modify (\s -> s { gsRoomDescVisible = False })
+    else modify (\s -> s { gsConfirmQuit = True })
 handleNormalKey _ _ (V.KChar '/') _ =
   modify (\gs -> gs { gsPrompt = Just "" })
 handleNormalKey _ _ (V.KChar '?') _ =
@@ -719,19 +759,23 @@ deleteAt sm idx = case drop idx (smSlots sm) of
 startAIRuntime :: GameConfig -> BChan.BChan AppEvent -> IO AIRuntime
 startAIRuntime gc chan = do
   let cfg = gcAI gc
-  client  <- AIClient.newAIClient cfg
-  pending <- newIORef []
-  tokRef  <- newIORef 0
-  mapRef  <- newIORef []
-  worker  <- AIAsync.startAIWorker client cfg $ \resp ->
+  client    <- AIClient.newAIClient cfg
+  pending   <- newIORef []
+  tokRef    <- newIORef 0
+  mapRef    <- newIORef []
+  seenFloor <- newIORef Set.empty
+  seenRoom  <- newIORef Set.empty
+  worker    <- AIAsync.startAIWorker client cfg $ \resp ->
     BChan.writeBChan chan (AIResult resp)
   pure AIRuntime
-    { aiCfg       = cfg
-    , aiClient    = client
-    , aiWorker    = worker
-    , aiPending   = pending
-    , aiNextToken = tokRef
-    , aiTokenMap  = mapRef
+    { aiCfg        = cfg
+    , aiClient     = client
+    , aiWorker     = worker
+    , aiPending    = pending
+    , aiNextToken  = tokRef
+    , aiTokenMap   = mapRef
+    , aiSeenFloors = seenFloor
+    , aiSeenRooms  = seenRoom
     }
 
 -- | Tear down the AI runtime. Idempotent — safe to call during
@@ -784,6 +828,79 @@ maybeFireGreeting rt
 describeNPCRole :: NPC -> String
 describeNPCRole _ = "Quest Master"
 
+-- | Fire a quest-generation request for the current dungeon floor if
+--   we haven't already. Runs on every keystroke — most calls are
+--   no-ops because AI is disabled or the floor is already in
+--   'aiSeenFloors'. The first keystroke on a fresh floor is the
+--   one that actually submits the request.
+--
+--   The response lands back in 'applyAIResponse' as a 'RespQuest',
+--   where the JSON is parsed into a 'Quest' and appended to the
+--   Quest Master's offer list. The player discovers it next time
+--   they open the dialogue.
+maybeFireQuest :: AIRuntime -> EventM () GameState ()
+maybeFireQuest rt
+  | not (aiEnabled (aiCfg rt)) = pure ()
+  | otherwise = do
+      gs <- get
+      let depth = dlDepth (gsLevel gs)
+      fire <- liftIO $ atomicModifyIORef' (aiSeenFloors rt) $ \s ->
+        if Set.member depth s
+          then (s, False)
+          else (Set.insert depth s, True)
+      when fire $ liftIO $ do
+        tok <- atomicModifyIORef' (aiNextToken rt) $ \n -> (n + 1, n + 1)
+        let prompt = AIPrompts.questPrompt
+                       depth
+                       (sLevel (gsPlayerStats gs))
+                       0   -- ^ monsters-killed counter not tracked; pass 0 for flavor
+        AIAsync.requestAI (aiWorker rt) (ReqQuest tok prompt)
+
+-- | Fire a room-description request for the room the player is
+--   currently standing in, if we haven't already asked about it on
+--   this floor. Dedup is keyed on @(depth, roomIndex)@ via
+--   'aiSeenRooms' so walking in and out of a room doesn't re-ask
+--   the LLM, and descending to a previously-visited floor doesn't
+--   either (the set is process-local, not serialized).
+--
+--   Any pending description from the previous room is hidden the
+--   instant a new request fires, so the old panel can't linger on
+--   top of the new room while the reply is in flight.
+maybeFireRoomDesc :: AIRuntime -> EventM () GameState ()
+maybeFireRoomDesc rt
+  | not (aiEnabled (aiCfg rt)) = pure ()
+  | otherwise = do
+      gs <- get
+      let depth = dlDepth (gsLevel gs)
+          rooms = dlRooms (gsLevel gs)
+      case roomIndexAt rooms (gsPlayerPos gs) of
+        Nothing      -> pure ()
+        Just roomIdx -> do
+          let slot = (depth, roomIdx)
+          fire <- liftIO $ atomicModifyIORef' (aiSeenRooms rt) $ \s ->
+            if Set.member slot s
+              then (s, False)
+              else (Set.insert slot s, True)
+          when fire $ do
+            -- Hide any stale description from the previous room so
+            -- the old panel doesn't sit on top of the new room while
+            -- the new reply is in flight.
+            modify (\s -> s { gsRoomDescVisible = False })
+            let room = rooms !! roomIdx
+                monsterNames =
+                  [ T.pack (monsterName (mKind m))
+                  | m <- gsMonsters gs
+                  , let V2 mx my = mPos m
+                  , mx >= rX room, mx < rX room + rW room
+                  , my >= rY room, my < rY room + rH room
+                  ]
+            liftIO $ do
+              tok <- atomicModifyIORef' (aiNextToken rt) $ \n -> (n + 1, n + 1)
+              atomicModifyIORef' (aiTokenMap rt) $ \m -> ((tok, slot) : m, ())
+              let prompt = AIPrompts.roomDescPrompt
+                             (rW room) (rH room) depth monsterNames
+              AIAsync.requestAI (aiWorker rt) (ReqRoomDesc tok prompt)
+
 -- | Fold a completed AI response into 'GameState'. For greetings
 --   this is: find the NPC the request was fired for and stamp the
 --   cleaned reply into its 'npcAIGreet' field. For other response
@@ -827,8 +944,54 @@ applyAIResponse rt resp = case resp of
       case mSlot of
         Just s  -> (filter (/= s) ps, ())
         Nothing -> (ps, ())
-  RespQuest{}    -> pure ()  -- not wired into gameplay yet
-  RespRoomDesc{} -> pure ()  -- not wired into gameplay yet
+  RespQuest _ (Right body) ->
+    -- Parse the LLM's JSON reply and, on success, append the quest
+    -- to the Quest Master's offer list so the player finds it the
+    -- next time they open the dialogue. Parse failures drop silently
+    -- — the player still has the hardcoded offers to pick from.
+    case AIQuestGen.parseQuestJSON body of
+      Left _  -> pure ()
+      Right q -> do
+        modify (appendQuestToFirstNPC q)
+        -- Soft in-world hint so the player knows something new is
+        -- available without having to revisit the Quest Master on
+        -- every descent. Only fires on a successful parse so a
+        -- failed request doesn't leak into the log.
+        modify $ \gs -> gs
+          { gsMessages =
+              ("The Quest Master calls on you: \"" ++ qName q ++ "\".")
+              : gsMessages gs
+          }
+  RespQuest{}    -> pure ()  -- Left (AIError): fall back silently
+  RespRoomDesc tok (Right descTxt) -> do
+    -- Pop the slot this token was fired for, if any. A missing
+    -- token is silently dropped — likely a load/reset cleared the
+    -- map between request and reply.
+    mSlot <- liftIO $ atomicModifyIORef' (aiTokenMap rt) $ \m ->
+      case lookup tok m of
+        Just s  -> (filter ((/= tok) . fst) m, Just s)
+        Nothing -> (m, Nothing)
+    case mSlot of
+      Nothing -> pure ()
+      Just (depth, roomIdx) -> do
+        gs <- get
+        let curDepth = dlDepth (gsLevel gs)
+            curRoom  = roomIndexAt (dlRooms (gsLevel gs)) (gsPlayerPos gs)
+        -- Only apply if the player is still in the same room on the
+        -- same floor. Otherwise the reply is stale — they've already
+        -- walked off and pasting it now would describe the wrong
+        -- room. Drop silently.
+        when (curDepth == depth && curRoom == Just roomIdx) $
+          modify $ \s -> s
+            { gsRoomDesc        = Just (T.unpack descTxt)
+            , gsRoomDescVisible = True
+            }
+  RespRoomDesc tok (Left _) ->
+    -- Failure: just drain the token map so the slot counter doesn't
+    -- leak. The description stays 'Nothing' and the panel never
+    -- appears; the player sees no difference from AI being disabled.
+    liftIO $ atomicModifyIORef' (aiTokenMap rt) $ \m ->
+      (filter ((/= tok) . fst) m, ())
 
 -- | Stamp a cleaned greeting string into the NPC at the given index.
 --   No-op if the index is out of range (stale token, NPC despawned).
@@ -838,6 +1001,18 @@ updateNPCGreet idx g gs =
                         [0 ..]
                         (gsNPCs gs)
   in gs { gsNPCs = updated }
+
+-- | Append a newly generated quest to the first NPC's offer list.
+--   In the MVP the Quest Master lives at index 0 of 'gsNPCs' and
+--   is the only quest giver in the game, so "first NPC" is a safe
+--   proxy for "Quest Master". If 'gsNPCs' is empty the quest is
+--   silently dropped — the only way that happens is an unexpected
+--   load order, and a lost cosmetic quest is preferable to crashing.
+appendQuestToFirstNPC :: Quest -> GameState -> GameState
+appendQuestToFirstNPC q gs = case gsNPCs gs of
+  []           -> gs
+  (npc : rest) ->
+    gs { gsNPCs = npc { npcOffers = npcOffers npc ++ [q] } : rest }
 
 --------------------------------------------------------------------
 -- main

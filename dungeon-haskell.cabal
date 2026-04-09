@@ -95,6 +95,8 @@ executable dungeon-haskell
     , mtl
     , random
     , text
+    , containers
+    , linear
   ghc-options:         -threaded -rtsopts
 
 test-suite dungeon-haskell-test
