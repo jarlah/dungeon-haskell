@@ -18,6 +18,11 @@ module Game.UI.Prompt
   , dispatchCommand
   , doQuicksave
   , doQuickload
+    -- * Pure helpers (exposed for testing)
+  , PromptStep (..)
+  , stepPromptBuffer
+  , CommandEffect (..)
+  , routeCommand
   ) where
 
 import Brick (EventM, get, modify, put)
@@ -49,24 +54,52 @@ handlePromptKey
   -> V.Key
   -> String
   -> EventM Name GameState ()
-handlePromptKey mAudio rFlags key buf = case key of
-  V.KEsc ->
+handlePromptKey mAudio rFlags key buf = case stepPromptBuffer key buf of
+  PromptCancel ->
     modify (\gs -> gs { gsPrompt = Nothing })
-  V.KEnter -> do
+  PromptSubmit submitted -> do
     modify (\gs -> gs { gsPrompt = Nothing })
-    case parseCommand buf of
+    case parseCommand submitted of
       Right cmd -> dispatchCommand mAudio rFlags cmd
       Left err ->
         modify (\gs -> gs { gsMessages = ("Error: " ++ err) : gsMessages gs })
-  V.KBS ->
-    modify (\gs -> gs { gsPrompt = Just (dropLast buf) })
-  V.KChar c ->
-    modify (\gs -> gs { gsPrompt = Just (buf ++ [c]) })
-  _ ->
+  PromptEdit buf' ->
+    modify (\gs -> gs { gsPrompt = Just buf' })
+  PromptIgnore ->
     pure ()
-  where
-    dropLast [] = []
-    dropLast xs = init xs
+
+-- | Pure state-machine step for the slash-command prompt buffer.
+--   Given the pressed key and the current buffer, decides what
+--   should happen next: close the prompt ('PromptCancel'), submit
+--   the buffer ('PromptSubmit'), replace the buffer with a new
+--   edited version ('PromptEdit'), or do nothing ('PromptIgnore').
+--
+--   Extracted from 'handlePromptKey' so the per-keystroke decision
+--   table can be unit-tested without a 'Brick' runtime.
+data PromptStep
+  = PromptCancel
+    -- ^ Esc — close the prompt without dispatching anything.
+  | PromptSubmit String
+    -- ^ Enter — close the prompt and submit this buffer.
+  | PromptEdit String
+    -- ^ Backspace / printable character — replace the buffer with
+    --   this new value and keep the prompt open.
+  | PromptIgnore
+    -- ^ Any other key — no state change.
+  deriving (Eq, Show)
+
+-- | The decision function that drives the prompt state machine.
+--   Pure — the effect of each step is applied by 'handlePromptKey'.
+stepPromptBuffer :: V.Key -> String -> PromptStep
+stepPromptBuffer V.KEsc       _   = PromptCancel
+stepPromptBuffer V.KEnter     buf = PromptSubmit buf
+stepPromptBuffer V.KBS        buf = PromptEdit (dropLast buf)
+stepPromptBuffer (V.KChar c)  buf = PromptEdit (buf ++ [c])
+stepPromptBuffer _            _   = PromptIgnore
+
+dropLast :: [a] -> [a]
+dropLast [] = []
+dropLast xs = init xs
 
 -- | Route a parsed 'Command' to the right handler. Safe UI
 --   commands open modals or call the filesystem helpers inline;
@@ -77,37 +110,77 @@ dispatchCommand
   -> RuntimeFlags
   -> Command
   -> EventM Name GameState ()
-dispatchCommand mAudio rFlags cmd = case cmd of
-  -- Safe UI shortcuts: these are alternate paths to things the
-  -- player could already trigger with a keybind. No cheat check.
-  CmdHelp ->
+dispatchCommand mAudio rFlags cmd = case routeCommand rFlags cmd of
+  EffSetHelp ->
     modify (\gs -> gs { gsHelpOpen = True })
-  CmdQuit ->
+  EffConfirmQuit ->
     modify (\gs -> gs { gsConfirmQuit = True })
-  CmdInventory ->
+  EffSetInventory ->
     modify (\gs -> gs { gsInventoryOpen = True })
-  CmdQuests ->
+  EffSetQuestLog ->
     modify $ \gs -> gs
       { gsQuestLogOpen   = True
       , gsQuestLogCursor = Nothing
       }
-  CmdWait -> do
+  EffApplyWait -> do
     modify (applyAction Wait)
     playEventsFor mAudio
-  CmdSave       -> openSaveMenu rFlags SaveMode
-  CmdLoad       -> openSaveMenu rFlags LoadMode
-  CmdQuicksave  -> doQuicksave
-  CmdQuickload  -> doQuickload
-  -- Wizard cheats: gated on the runtime capability flag.
+  EffSaveMenu mode -> openSaveMenu rFlags mode
+  EffQuicksave     -> doQuicksave
+  EffQuickload     -> doQuickload
+  EffCheatBlocked ->
+    modify $ \gs -> gs
+      { gsMessages =
+          "Cheats are disabled. Launch with --wizard to enable."
+            : gsMessages gs
+      }
+  EffApplyCommand c -> modify (applyCommand c)
+
+-- | The set of effects a parsed 'Command' can resolve to. Pure
+--   classification of what 'dispatchCommand' should do, decoupled
+--   from the 'Brick' runtime so the wizard-gating rule can be
+--   unit-tested directly.
+data CommandEffect
+  = EffSetHelp
+    -- ^ Open the help modal.
+  | EffConfirmQuit
+    -- ^ Open the quit-confirmation modal.
+  | EffSetInventory
+    -- ^ Open the inventory modal.
+  | EffSetQuestLog
+    -- ^ Open the quest log modal (with no initial cursor).
+  | EffApplyWait
+    -- ^ Apply a 'Wait' action and advance monsters.
+  | EffSaveMenu SaveMenuMode
+    -- ^ Open the save picker in the given mode.
+  | EffQuicksave
+    -- ^ Free-action quicksave.
+  | EffQuickload
+    -- ^ Free-action quickload.
+  | EffCheatBlocked
+    -- ^ The command is a cheat and @--wizard@ was not passed —
+    --   report the refusal in the message log.
+  | EffApplyCommand Command
+    -- ^ Fall through to 'applyCommand' for this command.
+  deriving (Eq, Show)
+
+-- | Pure classifier for dispatch. Safe UI commands resolve to
+--   dedicated effects; cheat commands are either blocked (no
+--   @--wizard@) or passed through to 'applyCommand'.
+routeCommand :: RuntimeFlags -> Command -> CommandEffect
+routeCommand rFlags cmd = case cmd of
+  CmdHelp       -> EffSetHelp
+  CmdQuit       -> EffConfirmQuit
+  CmdInventory  -> EffSetInventory
+  CmdQuests     -> EffSetQuestLog
+  CmdWait       -> EffApplyWait
+  CmdSave       -> EffSaveMenu SaveMode
+  CmdLoad       -> EffSaveMenu LoadMode
+  CmdQuicksave  -> EffQuicksave
+  CmdQuickload  -> EffQuickload
   _
-    | isCheatCommand cmd, not (rfWizardEnabled rFlags) ->
-        modify $ \gs -> gs
-          { gsMessages =
-              "Cheats are disabled. Launch with --wizard to enable."
-                : gsMessages gs
-          }
-    | otherwise ->
-        modify (applyCommand cmd)
+    | isCheatCommand cmd, not (rfWizardEnabled rFlags) -> EffCheatBlocked
+    | otherwise -> EffApplyCommand cmd
 
 -- | Save the current 'GameState' to the quicksave slot and report
 --   the outcome into the message log. Quicksave is a free action —

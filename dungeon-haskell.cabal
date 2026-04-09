@@ -126,6 +126,9 @@ test-suite dungeon-haskell-test
     Game.SaveSpec
     Game.UI.TypesSpec
     Game.UI.SaveMenuSpec
+    Game.UI.PromptSpec
+    Game.UI.LaunchSpec
+    Game.UI.ModalsSpec
     Game.ConfigSpec
     Game.AI.ClientSpec
     Game.AI.QuestGenSpec
@@ -147,6 +150,7 @@ test-suite dungeon-haskell-test
     , yaml
     , directory
     , filepath
+    , vty
   build-tool-depends:
     hspec-discover:hspec-discover
   ghc-options:         -threaded -rtsopts

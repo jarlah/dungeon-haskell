@@ -24,10 +24,15 @@ module Game.UI.Modals
   , handleInventoryKey
     -- * Shared audio helper
   , playEventsFor
+    -- * Pure helpers (exposed for testing)
+  , stepAutoClose
+  , stepDialogueAccept
+  , stepDialogueTurnIn
+  , stepQuestLogSelect
   ) where
 
 import Brick
-  ( EventM, Direction (..), get, halt, modify
+  ( EventM, Direction (..), get, halt, modify, put
   , vScrollBy, vScrollPage, vScrollToBeginning, vScrollToEnd, viewportScroll
   )
 import Control.Monad.IO.Class (liftIO)
@@ -106,13 +111,7 @@ handleQuestLogKey (V.KChar 'x') = do
     Just idx -> modify (abandonQuest idx)
     Nothing  -> pure ()
 handleQuestLogKey (V.KChar c)
-  | c >= 'a' && c <= 'z' = do
-      gs <- get
-      let idx    = ord c - ord 'a'
-          active = [ q | q <- gsQuests gs, qStatus q == QuestActive ]
-      if idx < length active
-        then modify (\s -> s { gsQuestLogCursor = Just idx })
-        else pure ()
+  | c >= 'a' && c <= 'z' = modify (stepQuestLogSelect c)
 handleQuestLogKey _ = pure ()
 
 -- | Keystrokes while an NPC dialogue modal is open. Lowercase
@@ -132,28 +131,22 @@ handleDialogueKey _ _ _ V.KEsc =
 handleDialogueKey mAudio _ npcIdx (V.KChar c)
   | c >= 'a' && c <= 'z' = do
       gs <- get
-      let offerIdx = ord c - ord 'a'
-          offers   = case drop npcIdx (gsNPCs gs) of
-            (n : _) -> npcOffers n
-            []      -> []
-      if offerIdx < length offers
-        then do
-          modify (acceptQuestFromNPC npcIdx offerIdx)
+      case stepDialogueAccept npcIdx c gs of
+        Just gs' -> do
+          put gs'
           -- If that was the last offer *and* the player has no
           -- ready quests to turn in here, auto-close the dialogue
           -- so they don't stare at an empty quest list.
           autoCloseIfIdle npcIdx
-        else pure ()
+        Nothing  -> pure ()
   | c >= 'A' && c <= 'Z' = do
       gs <- get
-      let readyIdx = ord c - ord 'A'
-          ready    = [ q | q <- gsQuests gs, qStatus q == QuestReadyToTurnIn ]
-      if readyIdx < length ready
-        then do
-          modify (turnInQuest npcIdx readyIdx)
+      case stepDialogueTurnIn npcIdx c gs of
+        Just gs' -> do
+          put gs'
           playEventsFor mAudio
           autoCloseIfIdle npcIdx
-        else pure ()
+        Nothing  -> pure ()
 handleDialogueKey _ _ _ _ = pure ()
 
 -- | Close the dialogue modal if the NPC has no remaining offers
@@ -161,15 +154,7 @@ handleDialogueKey _ _ _ _ = pure ()
 -- Called after accept/turn-in so the player isn't left staring at
 -- an empty dialogue screen.
 autoCloseIfIdle :: Int -> EventM Name GameState ()
-autoCloseIfIdle npcIdx = do
-  gs <- get
-  let stillOffering = case drop npcIdx (gsNPCs gs) of
-        (n : _) -> not (null (npcOffers n))
-        []      -> False
-      stillReady = any (\q -> qStatus q == QuestReadyToTurnIn) (gsQuests gs)
-  if stillOffering || stillReady
-    then pure ()
-    else modify (\s -> s { gsDialogue = Nothing })
+autoCloseIfIdle npcIdx = modify (stepAutoClose npcIdx)
 
 -- | Keystrokes while the game is waiting for a direction to
 --   complete a two-step command (currently only close-door). The
@@ -246,3 +231,62 @@ playEventsFor Nothing      = pure ()
 playEventsFor (Just audio) = do
   gs <- get
   liftIO $ mapM_ (Audio.playEvent audio) (gsEvents gs)
+
+--------------------------------------------------------------------
+-- Pure helpers
+--------------------------------------------------------------------
+
+-- | Pure core of 'autoCloseIfIdle': clear 'gsDialogue' if the NPC
+--   at the given index has no remaining offers and the player has
+--   no quests ready to turn in. Otherwise return the state
+--   unchanged.
+stepAutoClose :: Int -> GameState -> GameState
+stepAutoClose npcIdx gs
+  | stillOffering || stillReady = gs
+  | otherwise                   = gs { gsDialogue = Nothing }
+  where
+    stillOffering = case drop npcIdx (gsNPCs gs) of
+      (n : _) -> not (null (npcOffers n))
+      []      -> False
+    stillReady = any (\q -> qStatus q == QuestReadyToTurnIn) (gsQuests gs)
+
+-- | Pure core of the lowercase @a@..@z@ branch in
+--   'handleDialogueKey'. Given an NPC index and the accept letter,
+--   returns the new state after accepting the offer at that index,
+--   or 'Nothing' if the letter points past the end of the offer
+--   list. The caller is responsible for the subsequent auto-close
+--   check.
+stepDialogueAccept :: Int -> Char -> GameState -> Maybe GameState
+stepDialogueAccept npcIdx c gs
+  | offerIdx < length offers = Just (acceptQuestFromNPC npcIdx offerIdx gs)
+  | otherwise                = Nothing
+  where
+    offerIdx = ord c - ord 'a'
+    offers   = case drop npcIdx (gsNPCs gs) of
+      (n : _) -> npcOffers n
+      []      -> []
+
+-- | Pure core of the uppercase @A@..@Z@ branch in
+--   'handleDialogueKey'. Given an NPC index and the turn-in
+--   letter, returns the new state after handing in the ready-quest
+--   at that index, or 'Nothing' if the letter points past the end
+--   of the ready-to-turn-in list.
+stepDialogueTurnIn :: Int -> Char -> GameState -> Maybe GameState
+stepDialogueTurnIn npcIdx c gs
+  | readyIdx < length ready = Just (turnInQuest npcIdx readyIdx gs)
+  | otherwise               = Nothing
+  where
+    readyIdx = ord c - ord 'A'
+    ready    = [ q | q <- gsQuests gs, qStatus q == QuestReadyToTurnIn ]
+
+-- | Pure core of the letter branch in 'handleQuestLogKey'. Given
+--   an @a@..@z@ key and the current state, set the quest-log
+--   cursor to that index if it points at an active quest.
+--   Out-of-range indices leave the cursor unchanged.
+stepQuestLogSelect :: Char -> GameState -> GameState
+stepQuestLogSelect c gs
+  | idx < length active = gs { gsQuestLogCursor = Just idx }
+  | otherwise           = gs
+  where
+    idx    = ord c - ord 'a'
+    active = [ q | q <- gsQuests gs, qStatus q == QuestActive ]

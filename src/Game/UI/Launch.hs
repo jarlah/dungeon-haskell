@@ -11,6 +11,9 @@ module Game.UI.Launch
   , runLaunchOption
   , loadMostRecent
   , launchError
+    -- * Pure helpers (exposed for testing)
+  , stepLaunchCursor
+  , resolveLaunchOption
   ) where
 
 import Brick (EventM, halt, modify, put)
@@ -32,13 +35,11 @@ handleLaunchMenuKey
   -> V.Key
   -> EventM Name GameState ()
 handleLaunchMenuKey _  lm V.KUp =
-  let n = length launchOptions
-      c = (lmCursor lm - 1) `mod` n
-  in modify $ \gs -> gs { gsLaunchMenu = Just lm { lmCursor = c } }
+  let lm' = stepLaunchCursor (-1) lm
+  in modify $ \gs -> gs { gsLaunchMenu = Just lm' }
 handleLaunchMenuKey _  lm V.KDown =
-  let n = length launchOptions
-      c = (lmCursor lm + 1) `mod` n
-  in modify $ \gs -> gs { gsLaunchMenu = Just lm { lmCursor = c } }
+  let lm' = stepLaunchCursor 1 lm
+  in modify $ \gs -> gs { gsLaunchMenu = Just lm' }
 handleLaunchMenuKey rFlags lm V.KEnter = runLaunchOption rFlags lm
 handleLaunchMenuKey _  _  (V.KChar 'q') = halt
 handleLaunchMenuKey _  _  (V.KChar 'Q') = halt
@@ -57,24 +58,39 @@ handleLaunchMenuKey _ _ _ = pure ()
 --   Disabled options (Continue / Load with no saves) are silently
 --   ignored so the UI doesn't need a separate "error" state.
 runLaunchOption :: RuntimeFlags -> LaunchMenu -> EventM Name GameState ()
-runLaunchOption rFlags lm = case drop (lmCursor lm) launchOptions of
-  []        -> pure ()
-  (opt : _) -> case opt of
+runLaunchOption rFlags lm = case resolveLaunchOption lm of
+  Nothing  -> pure ()
+  Just opt -> case opt of
     LaunchNewGame ->
       -- The state we started with is already a fresh run — just
       -- drop the launch menu and let the game take over.
       modify $ \gs -> gs { gsLaunchMenu = Nothing }
-    LaunchContinue
-      | not (lmHasSaves lm) -> pure ()
-      | otherwise           -> loadMostRecent rFlags
-    LaunchLoad
-      | not (lmHasSaves lm) -> pure ()
-      | otherwise           -> do
-          -- Clear the launch menu first so the save picker layers
-          -- on top of the gameplay screen the way it does mid-run.
-          modify $ \gs -> gs { gsLaunchMenu = Nothing }
-          openSaveMenu rFlags LoadMode
+    LaunchContinue -> loadMostRecent rFlags
+    LaunchLoad     -> do
+      -- Clear the launch menu first so the save picker layers
+      -- on top of the gameplay screen the way it does mid-run.
+      modify $ \gs -> gs { gsLaunchMenu = Nothing }
+      openSaveMenu rFlags LoadMode
     LaunchQuit -> halt
+
+-- | Move the launch-menu cursor by the given delta, wrapping around
+--   the end of 'launchOptions'. Pure: only touches 'lmCursor'.
+stepLaunchCursor :: Int -> LaunchMenu -> LaunchMenu
+stepLaunchCursor delta lm =
+  let n = length launchOptions
+      c = (lmCursor lm + delta) `mod` n
+  in lm { lmCursor = c }
+
+-- | Which 'LaunchOption' should fire if the player hits Enter now.
+--   Returns 'Nothing' for out-of-range cursors and for disabled
+--   Continue / Load when the session has no visible saves.
+resolveLaunchOption :: LaunchMenu -> Maybe LaunchOption
+resolveLaunchOption lm = case drop (lmCursor lm) launchOptions of
+  []        -> Nothing
+  (opt : _) -> case opt of
+    LaunchContinue | not (lmHasSaves lm) -> Nothing
+    LaunchLoad     | not (lmHasSaves lm) -> Nothing
+    _                                    -> Just opt
 
 -- | Load the most recently modified save visible to the current
 --   session. Cheat-tainted saves are filtered out in non-wizard
