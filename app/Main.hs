@@ -30,7 +30,7 @@ import Game.Logic.Command (parseCommand)
 import Game.Logic.Dungeon (defaultLevelConfig)
 import Game.Logic.Quest (Quest(..), QuestStatus(..), qName)
 import Game.Render
-  ( drawGame, bossAttr, fogAttr, npcAttr
+  ( drawGame, bossAttr, doorAttr, fogAttr, npcAttr
   , saveMenuCursorAttr, saveMenuEmptyAttr
   , launchCursorAttr, launchDisabledAttr, launchTitleAttr
   )
@@ -108,6 +108,7 @@ mkApp mAudio aiRt = App
       [ (fogAttr,             fg V.brightBlack)
       , (npcAttr,             fg V.yellow)
       , (bossAttr,            fg V.red)
+      , (doorAttr,            fg V.brightYellow)
       , (saveMenuCursorAttr,  V.defAttr `V.withStyle` V.reverseVideo)
       , (saveMenuEmptyAttr,   fg V.brightBlack)
       , (launchCursorAttr,    V.defAttr `V.withStyle` V.reverseVideo)

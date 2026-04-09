@@ -3,6 +3,7 @@ module Game.Render
   , fogAttr
   , npcAttr
   , bossAttr
+  , doorAttr
   , saveMenuCursorAttr
   , saveMenuEmptyAttr
   , launchCursorAttr
@@ -43,6 +44,13 @@ npcAttr = attrName "npc"
 --   normal monster glyphs.
 bossAttr :: AttrName
 bossAttr = attrName "boss"
+
+-- | Attribute name used for doors (both open and closed). Main
+--   wires this to a yellow foreground so doors stand out from
+--   walls and floor — the glyphs alone (@'@ and @+@) are easy
+--   to lose against a dungeon wall without a color cue.
+doorAttr :: AttrName
+doorAttr = attrName "door"
 
 -- | Attribute name for the highlighted cursor row in the save/load
 --   modal. Main wires this to a reverse-video attribute so the
@@ -166,7 +174,13 @@ visibleCell gs pos
   | Just (_, it) <- find (\(p, _) -> p == pos) (gsItemsOnFloor gs) =
       str [itemGlyph it]
   | otherwise =
-      str [tileGlyph (gsLevel gs) pos]
+      let glyph = tileGlyph (gsLevel gs) pos
+          -- Doors get their own color so @'@ and @+@ don't get
+          -- lost against the floor/wall glyphs.
+          wrap = case tileAt (gsLevel gs) pos of
+            Just (Door _) -> withAttr doorAttr
+            _             -> id
+      in wrap (str [glyph])
 
 -- | Glyph for the terrain at a position, without the player or
 --   monsters overlaid. Used for both visible and fogged rendering.
@@ -174,7 +188,7 @@ tileGlyph :: DungeonLevel -> Pos -> Char
 tileGlyph dl pos = case tileAt dl pos of
   Just Floor         -> '.'
   Just Wall          -> '#'
-  Just (Door Open)   -> '/'
+  Just (Door Open)   -> '\''
   Just (Door Closed) -> '+'
   Just StairsDown    -> '>'
   Just StairsUp      -> '<'

@@ -71,18 +71,18 @@ isDoorTile :: Tile -> Bool
 isDoorTile (Door _) = True
 isDoorTile _        = False
 
--- | The four walls of a room as a flat list of positions. Mirrors
---   'roomPerimeterTiles' in 'Game.Logic.Dungeon', which isn't
---   exported; duplicating a 4-line helper here is cheaper than
---   widening the module interface for a test.
-roomPerimeterPositions :: Room -> [Pos]
-roomPerimeterPositions (Room x y w h) =
+-- | The ring of tiles one step *outside* a room's floor area.
+--   Mirrors 'roomOuterWallTiles' in 'Game.Logic.Dungeon', which
+--   isn't exported; duplicating a 4-line helper here is cheaper
+--   than widening the module interface for a test.
+roomOuterWallPositions :: Room -> [Pos]
+roomOuterWallPositions (Room x y w h) =
   let xs = [x .. x + w - 1]
       ys = [y .. y + h - 1]
-  in    [V2 xx y             | xx <- xs]
-     ++ [V2 xx (y + h - 1)   | xx <- xs]
-     ++ [V2 x             yy | yy <- ys]
-     ++ [V2 (x + w - 1)   yy | yy <- ys]
+  in    [V2 xx (y - 1)       | xx <- xs]
+     ++ [V2 xx (y + h)       | xx <- xs]
+     ++ [V2 (x - 1)       yy | yy <- ys]
+     ++ [V2 (x + w)       yy | yy <- ys]
 
 spec :: Spec
 spec = describe "Game.Logic.Dungeon.generateLevel" $ do
@@ -156,5 +156,5 @@ spec = describe "Game.Logic.Dungeon.generateLevel" $ do
       in case rooms of
            []      -> True
            (r : _) ->
-             let perim = roomPerimeterPositions r
-             in all (\p -> tileAt dl p /= Just (Door Closed)) perim
+             let walls = roomOuterWallPositions r
+             in all (\p -> tileAt dl p /= Just (Door Closed)) walls

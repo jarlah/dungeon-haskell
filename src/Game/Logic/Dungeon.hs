@@ -134,17 +134,28 @@ generateLevel gen0 cfg =
         [r]      -> (roomCenter r, roomCenter r)
         (r : rs) -> (roomCenter r, roomCenter (last (r : rs)))
 
-      -- Door placement: pick the tiles where a corridor crosses a
-      -- room's perimeter, roll each one Open / Closed, then stamp
+      -- Door placement: pick the tiles where a corridor has punched
+      -- through a room's *outer wall* (the ring of tiles one step
+      -- outside the room's floor area), keep only actual pinch
+      -- points (floor on one pair of opposite neighbors, wall on
+      -- the other), roll each survivor Open / Closed, then stamp
       -- them into the tile vector before stairs overwrite anything.
-      -- Spawn room perimeters are forced Open so the player can
+      -- Spawn room outer walls are forced Open so the player can
       -- never be softlocked into their starting area.
-      spawnPerim :: Set.Set Pos
-      spawnPerim = case rooms of
-        (r : _) -> Set.fromList (roomPerimeterTiles r)
+      spawnWalls :: Set.Set Pos
+      spawnWalls = case rooms of
+        (r : _) -> Set.fromList (roomOuterWallTiles r)
         []      -> Set.empty
-      candidates         = concatMap (roomDoorSites corridorSet) rooms
-      (doorStates, gen3) = rollDoors gen2 spawnPerim candidates
+      rawCandidates      =
+        dedup (concatMap (roomDoorSites corridorSet) rooms)
+      pinchPoints        =
+        filter (isPinchPoint floorSet) rawCandidates
+      candidates         =
+        collapseAdjacentCandidates pinchPoints
+      (doorStates, gen3) = rollDoors gen2 spawnWalls candidates
+
+      dedup :: [Pos] -> [Pos]
+      dedup = Set.toAscList . Set.fromList
 
       tiles = baseTiles V.//
         ( [ (posToIdx w p, Door ds) | (p, ds) <- doorStates ]
@@ -165,32 +176,77 @@ generateLevel gen0 cfg =
 posToIdx :: Int -> Pos -> Int
 posToIdx w (V2 x y) = y * w + x
 
--- | Every tile on the four walls of a room. Corners appear once —
---   duplicates are fine for the uses below because all consumers
---   build a 'Set' or iterate tolerantly.
-roomPerimeterTiles :: Room -> [Pos]
-roomPerimeterTiles (Room x y w h) =
+-- | Walk a list of door candidates in order and drop any that are
+--   cardinally adjacent to a candidate already kept. This collapses
+--   the "doubled doors" that appear when a corridor punches through
+--   a 2-tile-thick wall between rooms: both rooms contribute a
+--   candidate at the punched-through tile, and both tiles survive
+--   the pinch-point filter, so without this step the player sees
+--   @+'@ or @''@ side by side.
+collapseAdjacentCandidates :: [Pos] -> [Pos]
+collapseAdjacentCandidates = go Set.empty
+  where
+    go _        []       = []
+    go accepted (p : ps)
+      | any (`Set.member` accepted) (neighbors4 p) = go accepted ps
+      | otherwise =
+          p : go (Set.insert p accepted) ps
+
+    neighbors4 p =
+      [ p + V2 0 (-1)
+      , p + V2 0   1
+      , p + V2 1   0
+      , p + V2 (-1) 0
+      ]
+
+-- | Is the tile at 'p' a pinch point against a set of floor tiles
+--   — floor on exactly one pair of opposite cardinal neighbors and
+--   wall on the other pair? This is the geometric definition of
+--   "a gap in a wall," which is what every door must be. Without
+--   this check a corridor that passes through the thin strip of
+--   wall between two adjacent rooms produces "doors" that are
+--   actually surrounded by floor on all four sides.
+isPinchPoint :: Set.Set Pos -> Pos -> Bool
+isPinchPoint floorSet p =
+  let fN = Set.member (p + V2 0 (-1)) floorSet
+      fS = Set.member (p + V2 0   1 ) floorSet
+      fE = Set.member (p + V2 1   0 ) floorSet
+      fW = Set.member (p + V2 (-1) 0) floorSet
+  in (fN && fS && not fE && not fW)
+  || (fE && fW && not fN && not fS)
+
+-- | The ring of tiles one step *outside* a room's floor area — the
+--   tiles where the BSP generator ordinarily stamps wall. A door
+--   placed here sits inside an intact wall segment and reads
+--   visually as "a gap in the wall." Corner tiles appear in two of
+--   the four segments returned but downstream users dedup.
+roomOuterWallTiles :: Room -> [Pos]
+roomOuterWallTiles (Room x y w h) =
   let xs = [x .. x + w - 1]
       ys = [y .. y + h - 1]
-  in    [V2 xx y             | xx <- xs]
-     ++ [V2 xx (y + h - 1)   | xx <- xs]
-     ++ [V2 x             yy | yy <- ys]
-     ++ [V2 (x + w - 1)   yy | yy <- ys]
+  in    [V2 xx (y - 1)       | xx <- xs]  -- top wall
+     ++ [V2 xx (y + h)       | xx <- xs]  -- bottom wall
+     ++ [V2 (x - 1)       yy | yy <- ys]  -- left wall
+     ++ [V2 (x + w)       yy | yy <- ys]  -- right wall
 
--- | Door sites for a single room: scan each of the four perimeter
+-- | Door sites for a single room: scan each of the four *outer*
 --   walls independently for corridor tiles and collapse runs of
---   orthogonally-adjacent hits to a single position. Scanning per
---   wall guarantees a corridor that runs *alongside* a wall produces
---   one door, not a line of them.
+--   orthogonally-adjacent hits to a single position. A "hit" is a
+--   wall-ring tile the corridor carver turned into floor — i.e. an
+--   actual gap in the wall — so the resulting doors always sit
+--   between an interior floor tile and an exterior corridor tile,
+--   never in the middle of a room. Scanning per wall guarantees a
+--   corridor that runs parallel to a wall produces one door, not
+--   a line of them.
 roomDoorSites :: Set.Set Pos -> Room -> [Pos]
 roomDoorSites corridorSet (Room x y w h) =
   let xs = [x .. x + w - 1]
       ys = [y .. y + h - 1]
       hits ps = collapseRuns [p | p <- ps, Set.member p corridorSet]
-      top    = hits [V2 xx y           | xx <- xs]
-      bottom = hits [V2 xx (y + h - 1) | xx <- xs]
-      left   = hits [V2 x           yy | yy <- ys]
-      right  = hits [V2 (x + w - 1) yy | yy <- ys]
+      top    = hits [V2 xx (y - 1)       | xx <- xs]
+      bottom = hits [V2 xx (y + h)       | xx <- xs]
+      left   = hits [V2 (x - 1)       yy | yy <- ys]
+      right  = hits [V2 (x + w)       yy | yy <- ys]
   in top ++ bottom ++ left ++ right
 
 -- | Walk a list of positions in order and collapse runs of
