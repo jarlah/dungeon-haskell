@@ -91,6 +91,10 @@ equip i inv = case removeItem i inv of
       -- Potions aren't equipped; put it back where it was. Callers
       -- should route potions through 'quaffPotion' instead.
       inv
+    IKey _ ->
+      -- Keys aren't equipped; they're consumed by bumping the
+      -- matching locked door. Leave the bag untouched.
+      inv
 
 -- | Quaff a potion: consume it (caller removes from bag) and apply
 --   its effect to the supplied stats. The returned stats never

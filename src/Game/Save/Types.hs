@@ -101,5 +101,10 @@ instance Binary SaveMetadata
 --     'gsCheatsUsed' flag, and 'SaveMetadata' gained the matching
 --     'smCheatsUsed' field so the load menu can distinguish clean
 --     saves from cheat-touched ones without reading the whole blob.
+--   * @DHSAVE06@ — Locked doors. 'DoorState' gained 'Locked' (with
+--     a 'KeyId' payload), 'Item' gained 'IKey', and 'GameState'
+--     gained 'gsNextKeyId' / 'gsPendingKeys' / 'gsLockedDoorPrompt'
+--     for the generator, cross-level key scheduling, and the
+--     locked-door modal respectively.
 saveMagic :: BL.ByteString
-saveMagic = BL8.pack "DHSAVE05"
+saveMagic = BL8.pack "DHSAVE06"

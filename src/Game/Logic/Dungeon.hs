@@ -107,12 +107,26 @@ carveCorridors gen0 (r1:r2:rs) =
       (rest, gen2) = carveCorridors  gen1 (r2 : rs)
   in (seg ++ rest, gen2)
 
--- | Generate a random dungeon level. Returns the level, the player start
---   position (on StairsUp), the list of rooms placed, and the advanced
---   'StdGen'. The room list is returned so callers can use it for
---   monster / loot placement without re-running 'placeRooms'.
-generateLevel :: StdGen -> LevelConfig -> (DungeonLevel, Pos, [Room], StdGen)
-generateLevel gen0 cfg =
+-- | Generate a random dungeon level.
+--
+--   Takes the run's current "next key id" counter and returns the
+--   level, the player start position (on StairsUp), the list of
+--   rooms placed, an optional @(KeyId, Pos)@ for the lock that got
+--   minted on this floor (paired with the door's tile position so
+--   callers can compute reachability around it), the updated
+--   next-key counter, and the advanced 'StdGen'. The room list is
+--   returned so callers can use it for monster / loot placement
+--   without re-running 'placeRooms'.
+--
+--   The lock — if one was rolled — always lives on a door in a
+--   non-spawn-room wall, so the player can never be sealed into
+--   their starting room by a lock they can't open.
+generateLevel
+  :: StdGen
+  -> LevelConfig
+  -> Int
+  -> (DungeonLevel, Pos, [Room], Maybe (KeyId, Pos), Int, StdGen)
+generateLevel gen0 cfg nextKey0 =
   let (rooms,     gen1) = placeRooms     cfg gen0
       (corridors, gen2) = carveCorridors gen1 rooms
       w = lcWidth  cfg
@@ -152,7 +166,9 @@ generateLevel gen0 cfg =
         filter (isPinchPoint floorSet) rawCandidates
       candidates         =
         collapseAdjacentCandidates pinchPoints
-      (doorStates, gen3) = rollDoors gen2 spawnWalls candidates
+      (doorStates0, gen3)                         = rollDoors gen2 spawnWalls candidates
+      (doorStates, mLockedInfo, nextKey1, gen4)   =
+        tryLockOneDoor gen3 nextKey0 spawnWalls doorStates0
 
       dedup :: [Pos] -> [Pos]
       dedup = Set.toAscList . Set.fromList
@@ -171,7 +187,7 @@ generateLevel gen0 cfg =
         , dlTiles  = tiles
         , dlRooms  = rooms
         }
-  in (dl, stairsUpPos, rooms, gen3)
+  in (dl, stairsUpPos, rooms, mLockedInfo, nextKey1, gen4)
 
 posToIdx :: Int -> Pos -> Int
 posToIdx w (V2 x y) = y * w + x
@@ -277,8 +293,9 @@ collapseRuns = map runMid . groupRuns
 -- | Roll the state of every candidate door site from the level
 --   'StdGen'. Sites on the spawn room's perimeter are always 'Open';
 --   every other site is 'Open' with probability ~0.7 and 'Closed'
---   with probability ~0.3. Milestone 15 Step 2 will extend the roll
---   to cover 'Locked' once keys are in the game.
+--   with probability ~0.3. Locking is a separate post-pass (see
+--   'tryLockOneDoor') because it has to pick at most one door on
+--   the whole level and the ordinary open/closed roll is per-site.
 rollDoors :: StdGen -> Set.Set Pos -> [Pos] -> ([(Pos, DoorState)], StdGen)
 rollDoors gen0 spawnPerim = go gen0
   where
@@ -291,6 +308,42 @@ rollDoors gen0 spawnPerim = go gen0
                    in (if r <= 7 then Open else Closed, g1)
           (rest, g'') = go g' ps
       in ((p, ds) : rest, g'')
+
+-- | With 50% probability, upgrade one of the rolled doors to
+--   'Locked' and mint a fresh 'KeyId' for it. Only non-spawn-room
+--   doors are eligible so the player can never be sealed into
+--   their starting area. If the roll fails, or there are no
+--   eligible doors, the door list is returned unchanged and the
+--   key counter is untouched.
+--
+--   Returns the (possibly updated) door list, the 'KeyId' that
+--   was minted (if any), the advanced next-key counter, and the
+--   advanced 'StdGen'.
+tryLockOneDoor
+  :: StdGen
+  -> Int
+  -> Set.Set Pos
+  -> [(Pos, DoorState)]
+  -> ([(Pos, DoorState)], Maybe (KeyId, Pos), Int, StdGen)
+tryLockOneDoor gen0 nextKey spawnPerim doors =
+  let (roll, gen1) = randomR (1 :: Int, 100) gen0
+      eligible     =
+        [ i
+        | (i, (p, _)) <- zip [0 :: Int ..] doors
+        , not (Set.member p spawnPerim)
+        ]
+  in if roll > 50 || null eligible
+       then (doors, Nothing, nextKey, gen1)
+       else
+         let (pickIdx, gen2) = randomR (0, length eligible - 1) gen1
+             targetIdx       = eligible !! pickIdx
+             kid             = KeyId nextKey
+             targetPos       = fst (doors !! targetIdx)
+             doors'          =
+               [ if i == targetIdx then (p, Locked kid) else (p, ds)
+               | (i, (p, ds)) <- zip [0 :: Int ..] doors
+               ]
+         in (doors', Just (kid, targetPos), nextKey + 1, gen2)
 
 
 -- | Turn every 'StairsDown' tile on a level into plain 'Floor'.

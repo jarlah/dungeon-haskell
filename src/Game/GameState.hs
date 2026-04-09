@@ -196,6 +196,30 @@ data GameState = GameState
     --   @--wizard@ flag, so the two histories don't mix. Stamped
     --   to 'True' inside 'applyCommand' before the command itself
     --   runs.
+  , gsNextKeyId :: !Int
+    -- ^ Monotonic counter for the next 'KeyId' to mint. Bumped
+    --   every time the dungeon generator rolls a locked door, and
+    --   every time a cross-level key gets scheduled into
+    --   'gsPendingKeys'. Kept on the state (rather than global) so
+    --   save/load round-trips preserve the naming — a key the
+    --   player hasn't picked up yet keeps the same 'KeyId' and
+    --   therefore the same display name after a load.
+  , gsPendingKeys :: ![(Int, KeyId)]
+    -- ^ Keys minted by a locked door on some floor that still
+    --   need to be dropped as loot on a (possibly different)
+    --   floor. Each entry is @(targetDepth, keyId)@; when the
+    --   player first enters a floor, every pending entry whose
+    --   depth matches is drained and placed as floor loot inside
+    --   that floor's rooms. Scheduling is done at the moment a
+    --   lock is created so a key is always guaranteed to exist on
+    --   some reachable floor.
+  , gsLockedDoorPrompt :: !(Maybe String)
+    -- ^ 'Just name' when the player bumped a locked door without
+    --   the matching key — the renderer shows a modal saying "this
+    --   door needs the X key" and any keystroke clears it. The
+    --   payload is the already-formatted key name so the modal
+    --   doesn't have to reach back through a 'KeyId'. 'Nothing' in
+    --   every other situation.
   } deriving (Show)
 
 -- | Actions that need a direction supplied /after/ the initiating
@@ -389,6 +413,9 @@ mkGameState gen dl start monsters = recomputeVisibility GameState
   , gsRoomDescVisible = False
   , gsAwaitingDirection = Nothing
   , gsCheatsUsed        = False
+  , gsNextKeyId         = 0
+  , gsPendingKeys       = []
+  , gsLockedDoorPrompt  = Nothing
   }
 
 -- | Build a quest as an un-accepted *offer*. Same as 'mkQuest' but
@@ -418,14 +445,63 @@ recomputeVisibility gs =
 --   the plain-floor path unconditionally.
 newGame :: StdGen -> D.LevelConfig -> GameState
 newGame gen0 cfg =
-  let (bossDepth, gen1) = randomR (D.lcBossDepthRange cfg) gen0
-      (dl, startPos, rooms, gen2) = D.generateLevel gen1 cfg
+  let (bossDepth, gen1)                                = randomR (D.lcBossDepthRange cfg) gen0
+      (dl, startPos, rooms, mLocked, nextKey, gen2)    = D.generateLevel gen1 cfg 0
       -- Don't spawn monsters in the player's starting room.
       spawnRooms       = drop 1 rooms
       (monsters, gen3) = spawnMonsters gen2 spawnRooms
       (npcs,     gen4) = spawnNPCs gen3 (D.lcDepth cfg) rooms
-      base             = mkGameState gen4 dl startPos monsters
-  in base { gsNPCs = npcs, gsBossDepth = bossDepth }
+      -- If this floor minted a lock, the matching key is placed
+      -- immediately on this same floor, inside the spawn-side
+      -- component of the lock — so the player can always reach the
+      -- key before ever needing to open the door.
+      reachable        = spawnSideReachable dl startPos
+      keysToPlace      = case mLocked of
+        Just (kid, _) -> [kid]
+        Nothing       -> []
+      (keyLoot, gen5)  = placeKeyLoot gen4 reachable rooms keysToPlace
+      base             = mkGameState gen5 dl startPos monsters
+  in base
+       { gsNPCs         = npcs
+       , gsBossDepth    = bossDepth
+       , gsNextKeyId    = nextKey
+       , gsPendingKeys  = []
+       , gsItemsOnFloor = keyLoot
+       }
+
+-- | 4-connected flood fill from the player spawn, treating walls
+--   AND any locked door as impassable (but treating closed doors as
+--   passable, since bump-to-open doesn't need a key). The result is
+--   exactly the set of tiles a keyless player can reach from their
+--   spawn tile. At most one locked door exists per level, so this is
+--   equivalent to "reachable while the lock stays locked."
+--
+--   Used by 'placeKeyLoot' to guarantee a minted key is never placed
+--   on the far side of its own lock (which would softlock the run).
+spawnSideReachable :: DungeonLevel -> Pos -> Set Pos
+spawnSideReachable dl start = go (Set.singleton start) [start]
+  where
+    passable p = case tileAt dl p of
+      Just Wall           -> False
+      Just (Door (Locked _)) -> False
+      Just _              -> True
+      Nothing             -> False
+
+    go visited []       = visited
+    go visited (p : qs) =
+      let neighbors =
+            [ p + V2 0 (-1)
+            , p + V2 0   1
+            , p + V2 1   0
+            , p + V2 (-1) 0
+            ]
+          fresh =
+            [ n
+            | n <- neighbors
+            , not (Set.member n visited)
+            , passable n
+            ]
+      in go (foldr Set.insert visited fresh) (qs ++ fresh)
 
 -- | Place NPCs for a freshly generated level. For the M10.1 MVP
 --   this only fires on depth 1 and drops a single "Quest Master"
@@ -701,6 +777,27 @@ applyAction act gs0 =
                         msg = "You open the door."
                     in processMonsters
                          (gs' { gsMessages = msg : gsMessages gs' })
+                  -- Bump-to-unlock: if the player is carrying the
+                  -- matching key, consume it, swap the door to
+                  -- 'Door Open', advance the turn. Otherwise show a
+                  -- "needs the X key" modal and DO NOT advance —
+                  -- the failed attempt is a free no-op like bumping
+                  -- a wall.
+                  Just (Door (Locked kid)) ->
+                    case findKeyIndex kid (gsInventory gs) of
+                      Just ki ->
+                        let inv' = Inv.dropItem ki (gsInventory gs)
+                            gs'  = openDoorAt target gs
+                            nm   = keyName kid
+                            msg  = "You unlock the door with the "
+                                ++ nm ++ "."
+                        in processMonsters
+                             (gs' { gsInventory = inv'
+                                  , gsMessages  = msg : gsMessages gs'
+                                  })
+                      Nothing ->
+                        -- no key: raise the modal, no turn cost
+                        gs { gsLockedDoorPrompt = Just (keyName kid) }
                   _ ->
                     case M.tryMove (gsLevel gs) (gsPlayerPos gs) dir of
                       Just newPos -> processMonsters (gs { gsPlayerPos = newPos })
@@ -762,6 +859,18 @@ monsterAt p = go 0
     go i (m : rest)
       | monsterOccupies m p = Just (i, m)
       | otherwise           = go (i + 1) rest
+
+-- | Index of the first 'IKey' in the player's bag whose 'KeyId'
+--   matches the given lock, or 'Nothing' if no matching key is
+--   present. Used by the bump-to-unlock path to consume the key
+--   from the same position it was picked up from.
+findKeyIndex :: KeyId -> Inventory -> Maybe Int
+findKeyIndex kid inv = go 0 (invItems inv)
+  where
+    go _ []                       = Nothing
+    go i (IKey k : rest) | k == kid = Just i
+                         | otherwise = go (i + 1) rest
+    go i (_      : rest)            = go (i + 1) rest
 
 -- | Rewrite the tile at 'p' to @Door Open@. Used by the bump-to-open
 --   path in 'applyAction' so a closed door becomes walkable on the
@@ -1069,6 +1178,13 @@ playerUseItem idx gs =
         let inv' = Inv.equip idx (gsInventory gs)
             msg  = "You don the " ++ itemName item ++ "."
         in gs { gsInventory = inv', gsMessages = msg : gsMessages gs }
+      IKey _ ->
+        -- Keys aren't "used" from the inventory screen; the player
+        -- bumps the matching locked door and the key is consumed
+        -- automatically. Explain why nothing happened.
+        let msg = "You fiddle with the " ++ itemName item
+               ++ ". It probably fits a door somewhere."
+        in gs { gsMessages = msg : gsMessages gs }
   where
     lookupBag i inv
       | i < 0 || i >= length (invItems inv) = Nothing
@@ -1125,43 +1241,133 @@ loadParked pl gs = gs
 generateAndEnter :: Int -> GameState -> GameState
 generateAndEnter depth gs =
   let cfg            = D.defaultLevelConfig { D.lcDepth = depth }
-      (dl0, start, rooms, g1) = D.generateLevel (gsRng gs) cfg
+      (dl0, start, rooms, mLocked, nextKey1, g1) =
+        D.generateLevel (gsRng gs) cfg (gsNextKeyId gs)
       isBossFloor   = depth == gsBossDepth gs && not (null rooms)
+      -- If this level minted a lock, the key is placed on this
+      -- same floor (not deferred) and must land on the spawn-side
+      -- of the lock so the player can reach it without opening the
+      -- door. 'spawnSideReachable' walks the level treating locked
+      -- doors as walls, giving us the keyless-reachable tile set.
+      reachable     = spawnSideReachable dl0 start
+      newKeys       = case mLocked of
+        Just (kid, _) -> [kid]
+        Nothing       -> []
+      -- Any keys left over from earlier floors' scheduling (should
+      -- always be empty now that 'scheduleKeyDrop' is same-floor,
+      -- but we still honor the list for save-compat) get drained
+      -- when their target depth matches.
+      (drainedPending, remainingPending) =
+        ( [ kid | (d, kid) <- gsPendingKeys gs, d == depth ]
+        , [ e   | e@(d, _) <- gsPendingKeys gs, d /= depth ]
+        )
+      keysToPlace   = newKeys ++ drainedPending
+      (keyLoot, g2) = placeKeyLoot g1 reachable rooms keysToPlace
   in if isBossFloor
        then
          let bossRoom            = last rooms
              -- Rooms that still get regular spawns: everything except
              -- the starting room (index 0) and the boss room.
              regularRooms        = drop 1 (init rooms)
-             (regulars, g2)      = spawnMonsters g1 regularRooms
-             (dragonPos, g3)     = pickBossTopLeft bossRoom g2
+             (regulars, g3)      = spawnMonsters g2 regularRooms
+             (dragonPos, g4)     = pickBossTopLeft bossRoom g3
              dragon              = mkMonster Dragon dragonPos
              dl                  = D.stripStairsDown dl0
          in gs
               { gsLevel        = dl
               , gsMonsters     = dragon : regulars
-              , gsItemsOnFloor = []
+              , gsItemsOnFloor = keyLoot
               , gsExplored     = Set.empty
               , gsPlayerPos    = start
-              , gsRng          = g3
+              , gsRng          = g4
               , gsBossRoom     = Just bossRoom
               , gsRoomDesc        = Nothing
               , gsRoomDescVisible = False
+              , gsNextKeyId    = nextKey1
+              , gsPendingKeys  = remainingPending
               }
        else
          let spawnRooms     = drop 1 rooms
-             (monsters, g2) = spawnMonsters g1 spawnRooms
+             (monsters, g3) = spawnMonsters g2 spawnRooms
          in gs
               { gsLevel        = dl0
               , gsMonsters     = monsters
-              , gsItemsOnFloor = []
+              , gsItemsOnFloor = keyLoot
               , gsExplored     = Set.empty
               , gsPlayerPos    = start
-              , gsRng          = g2
+              , gsRng          = g3
               , gsBossRoom     = Nothing
               , gsRoomDesc        = Nothing
               , gsRoomDescVisible = False
+              , gsNextKeyId    = nextKey1
+              , gsPendingKeys  = remainingPending
               }
+
+-- | Drop every pending key onto a random floor tile inside a room
+--   that the player can reach from spawn /without/ opening any
+--   locked door — i.e. a room whose tiles intersect the
+--   'spawnSideReachable' set for this level. Prefers non-spawn
+--   rooms (so the player doesn't trip over the key on the same step
+--   they enter the floor) and falls back to the spawn room if no
+--   non-spawn room is on the spawn side. Each key becomes one
+--   @(Pos, IKey kid)@ entry suitable for 'gsItemsOnFloor'.
+--
+--   The reachability filter is what prevents a softlock where the
+--   lock sits between spawn and the key itself.
+placeKeyLoot
+  :: StdGen
+  -> Set Pos
+  -> [D.Room]
+  -> [KeyId]
+  -> ([(Pos, Item)], StdGen)
+placeKeyLoot gen0 reachable rooms keys =
+  let -- Tiles of a room that are actually reachable (pre-filtered).
+      roomReachableTiles r =
+        [ p | p <- roomPositions r, Set.member p reachable ]
+
+      -- Rooms that still have at least one reachable tile.
+      reachableRooms = filter (not . null . roomReachableTiles) rooms
+
+      -- Prefer non-spawn rooms (index >= 1). If none of those are
+      -- reachable (pathological: the locked door seals off
+      -- everything past the spawn room), fall back to the spawn
+      -- room alone. If nothing is reachable at all, the key is
+      -- silently dropped — at that point the level is broken in
+      -- ways unrelated to locked doors.
+      preferredRooms =
+        let nonSpawn = filter (not . null . roomReachableTiles) (drop 1 rooms)
+        in if null nonSpawn
+             then case rooms of
+                    (r : _) | not (null (roomReachableTiles r)) -> [r]
+                    _                                            -> []
+             else nonSpawn
+
+      pool
+        | not (null preferredRooms) = preferredRooms
+        | otherwise                 = reachableRooms
+
+      go g [] = ([], g)
+      go g (k : ks) = case pool of
+        [] -> go g ks  -- nothing reachable: drop the key
+        _  ->
+          let (ri, g1)    = randomR (0, length pool - 1) g
+              room        = pool !! ri
+              tiles       = roomReachableTiles room
+              (ti, g2)    = randomR (0, length tiles - 1) g1
+              pos         = tiles !! ti
+              (rest, g3)  = go g2 ks
+          in ((pos, IKey k) : rest, g3)
+  in go gen0 keys
+
+-- | Every @(x, y)@ floor tile inside a room's rectangle. Rooms are
+--   carved as solid floor, so every position here is guaranteed to
+--   be a walkable tile in the generated level.
+roomPositions :: D.Room -> [Pos]
+roomPositions r =
+  [ V2 x y
+  | x <- [D.rX r .. D.rX r + D.rW r - 1]
+  , y <- [D.rY r .. D.rY r + D.rH r - 1]
+  ]
 
 -- | Should the boss music track be playing right now? True iff the
 --   player is currently standing on the boss floor /and/ has

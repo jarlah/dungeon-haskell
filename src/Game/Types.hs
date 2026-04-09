@@ -2,6 +2,8 @@ module Game.Types
   ( Pos
   , Dir(..)
   , dirToOffset
+  , KeyId(..)
+  , keyName
   , DoorState(..)
   , Tile(..)
   , DungeonLevel(..)
@@ -54,7 +56,32 @@ dirToOffset SW = V2 (-1) 1
 dirToOffset W  = V2 (-1) 0
 dirToOffset NW = V2 (-1) (-1)
 
-data DoorState = Open | Closed
+-- | Identifier for a key / lock pair. Allocated monotonically by the
+--   dungeon generator (see @gsNextKeyId@ in "Game.GameState"), so no
+--   two locks in a single run ever share a 'KeyId'. Rendering code
+--   never pattern-matches on the integer — it goes through 'keyName'
+--   to get a stable human-readable name.
+newtype KeyId = KeyId Int
+  deriving (Eq, Ord, Show)
+
+-- | Stable, human-readable name for a key / lock. Pure function of
+--   the 'KeyId', so a given lock always shows the same name in the
+--   "requires the X key" prompt and on the matching inventory item.
+--   The first twelve locks get a flavoured name from a fixed pool;
+--   a dungeon run is extremely unlikely to produce more than that,
+--   but if it does we fall back to a numbered "key #N" so the name
+--   is still unique.
+keyName :: KeyId -> String
+keyName (KeyId n)
+  | n >= 0 && n < length pool = (pool !! n) ++ " key"
+  | otherwise                 = "key #" ++ show n
+  where
+    pool =
+      [ "brass", "iron", "bone", "silver", "rusty", "copper"
+      , "bronze", "gold", "jade", "obsidian", "crystal", "ivory"
+      ]
+
+data DoorState = Open | Closed | Locked !KeyId
   deriving (Eq, Show)
 
 data Tile = Floor | Wall | Door DoorState | StairsDown | StairsUp
@@ -119,12 +146,13 @@ tileAt dl (V2 x y)
   | otherwise = Just $ dlTiles dl ! (y * dlWidth dl + x)
 
 isWalkable :: Tile -> Bool
-isWalkable Floor         = True
-isWalkable (Door Open)   = True
-isWalkable StairsDown    = True
-isWalkable StairsUp      = True
-isWalkable Wall          = False
-isWalkable (Door Closed) = False
+isWalkable Floor            = True
+isWalkable (Door Open)      = True
+isWalkable StairsDown       = True
+isWalkable StairsUp         = True
+isWalkable Wall             = False
+isWalkable (Door Closed)    = False
+isWalkable (Door (Locked _)) = False
 
 -- | Actions the player (or AI) can attempt on a turn.
 data GameAction
@@ -300,15 +328,17 @@ data Item
   = IPotion !Potion
   | IWeapon !Weapon
   | IArmor  !Armor
+  | IKey    !KeyId
   deriving (Eq, Show)
 
 -- | ASCII glyph used to render an item on the dungeon floor or in
 --   the inventory screen. Follows the rogue/NetHack convention:
---   @!@ potions, @)@ weapons, @[@ armor.
+--   @!@ potions, @)@ weapons, @[@ armor, @(@ keys/tools.
 itemGlyph :: Item -> Char
 itemGlyph (IPotion _) = '!'
 itemGlyph (IWeapon _) = ')'
 itemGlyph (IArmor  _) = '['
+itemGlyph (IKey    _) = '('
 
 -- | Human-readable name for message log / inventory listing.
 itemName :: Item -> String
@@ -318,6 +348,7 @@ itemName (IWeapon ShortSword)   = "short sword"
 itemName (IWeapon LongSword)    = "long sword"
 itemName (IArmor  LeatherArmor) = "leather armor"
 itemName (IArmor  ChainMail)    = "chain mail"
+itemName (IKey    k)            = keyName k
 
 -- | What the player is carrying. 'invItems' holds unequipped items
 --   in pickup order; 'invWeapon' / 'invArmor' are the currently

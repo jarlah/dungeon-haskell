@@ -22,6 +22,7 @@ module Game.UI.Modals
   , handleAwaitingDirectionKey
   , directionFromKey
   , handleInventoryKey
+  , handleLockedDoorKey
     -- * Shared audio helper
   , playEventsFor
     -- * Pure helpers (exposed for testing)
@@ -222,6 +223,15 @@ handleInventoryKey mAudio (V.KChar c)
           playEventsFor mAudio
         else pure ()
 handleInventoryKey _ _ = pure ()
+
+-- | Keystrokes while the "this door needs the X key" modal is
+--   open. Any keystroke — including 'Esc' — dismisses the modal
+--   by clearing 'gsLockedDoorPrompt'. The modal exists purely so
+--   the player sees /which/ key is required; it never consumes a
+--   turn (the bump that raised it was already a free no-op).
+handleLockedDoorKey :: V.Key -> EventM Name GameState ()
+handleLockedDoorKey _ =
+  modify (\gs -> gs { gsLockedDoorPrompt = Nothing })
 
 -- | Fire SFX for every GameEvent the last action produced.
 --   Extracted so the inventory and normal paths share one place

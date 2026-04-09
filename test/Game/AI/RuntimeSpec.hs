@@ -84,6 +84,9 @@ mkFixture npcs = GameState
   , gsRoomDescVisible = False
   , gsAwaitingDirection = Nothing
   , gsCheatsUsed     = False
+  , gsNextKeyId      = 0
+  , gsPendingKeys    = []
+  , gsLockedDoorPrompt = Nothing
   }
 
 -- | A small canned quest used by the 'appendQuestToFirstNPC' tests.

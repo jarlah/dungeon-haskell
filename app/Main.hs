@@ -20,14 +20,15 @@ import qualified Game.Config as Config
 import Game.GameState
 import Game.Logic.Dungeon (defaultLevelConfig)
 import Game.Render
-  ( drawGame, bossAttr, doorAttr, fogAttr, npcAttr
+  ( drawGame, bossAttr, doorAttr, lockedDoorAttr, fogAttr, npcAttr
   , saveMenuCursorAttr, saveMenuEmptyAttr
   , launchCursorAttr, launchDisabledAttr, launchTitleAttr
   )
 import Game.UI.Launch (handleLaunchMenuKey)
 import Game.UI.Modals
   ( handleAwaitingDirectionKey, handleConfirmQuitKey, handleDialogueKey
-  , handleHelpKey, handleInventoryKey, handleQuestLogKey, handleVictoryKey
+  , handleHelpKey, handleInventoryKey, handleLockedDoorKey
+  , handleQuestLogKey, handleVictoryKey
   )
 import Game.UI.Normal (handleNormalKey)
 import Game.UI.Prompt (handlePromptKey)
@@ -54,6 +55,7 @@ mkApp mAudio aiRt rFlags = App
       , (npcAttr,             fg V.yellow)
       , (bossAttr,            fg V.red)
       , (doorAttr,            fg V.brightYellow)
+      , (lockedDoorAttr,      fg V.red)
       , (saveMenuCursorAttr,  V.defAttr `V.withStyle` V.reverseVideo)
       , (saveMenuEmptyAttr,   fg V.brightBlack)
       , (launchCursorAttr,    V.defAttr `V.withStyle` V.reverseVideo)
@@ -83,6 +85,8 @@ handleEvent mAudio aiRt rFlags (VtyEvent (V.EvKey key mods)) = do
       | Just i   <- gsDialogue gs   -> handleDialogueKey mAudio aiRt i key
       | gsQuestLogOpen gs           -> handleQuestLogKey key
       | gsInventoryOpen gs          -> handleInventoryKey mAudio key
+      | Just _   <- gsLockedDoorPrompt gs ->
+          handleLockedDoorKey key
       | Just dirAct <- gsAwaitingDirection gs ->
           handleAwaitingDirectionKey mAudio dirAct key
       | otherwise                   -> handleNormalKey mAudio aiRt rFlags key mods

@@ -139,6 +139,7 @@ instance Binary StdGen where
 --------------------------------------------------------------------
 
 deriving instance Generic Dir
+deriving instance Generic KeyId
 deriving instance Generic DoorState
 deriving instance Generic Tile
 deriving instance Generic DungeonLevel
@@ -172,6 +173,7 @@ deriving instance Generic DirectionalAction
 deriving instance Generic GameState
 
 instance Binary Dir
+instance Binary KeyId
 instance Binary DoorState
 instance Binary Tile
 instance Binary DungeonLevel

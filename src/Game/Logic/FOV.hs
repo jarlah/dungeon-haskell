@@ -25,12 +25,13 @@ import Game.Types
 --   doors and walls block sight; open doors, floors, and stairs do
 --   not.
 transparent :: Tile -> Bool
-transparent Floor         = True
-transparent Wall          = False
-transparent (Door Open)   = True
-transparent (Door Closed) = False
-transparent StairsDown    = True
-transparent StairsUp      = True
+transparent Floor              = True
+transparent Wall               = False
+transparent (Door Open)        = True
+transparent (Door Closed)      = False
+transparent (Door (Locked _))  = False
+transparent StairsDown         = True
+transparent StairsUp           = True
 
 -- | Symmetric Bresenham line-of-sight check: does 'a' have a clear
 --   sightline to 'b'? @A@ sees @B@ if either the line from A→B OR

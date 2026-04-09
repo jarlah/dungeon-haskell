@@ -13,6 +13,7 @@ import Test.Hspec
 
 import Game.GameState
 import Game.Logic.Command (Command(..))
+import Game.Logic.Dungeon (defaultLevelConfig)
 import Game.Logic.MonsterAI (chebyshev)
 import Game.Logic.Quest
   ( Quest(..), QuestGoal(..), QuestStatus(..), mkQuest )
@@ -68,6 +69,9 @@ mkFixture seed ppos pstats monsters = GameState
   , gsRoomDescVisible = False
   , gsAwaitingDirection = Nothing
   , gsCheatsUsed        = False
+  , gsNextKeyId         = 0
+  , gsPendingKeys       = []
+  , gsLockedDoorPrompt  = Nothing
   }
 
 -- | Player stats strong enough to one-shot anything normal.
@@ -110,6 +114,60 @@ spec = describe "Game.GameState.applyAction / event emission" $ do
         gs' = applyAction (Move N) gs
     gsPlayerPos gs' `shouldBe` V2 2 2
     tileAt (gsLevel gs') doorPos `shouldBe` Just (Door Open)
+
+  -- ----------------------------------------------------------------
+  -- Milestone 15 / Step 2: locked doors.
+  -- ----------------------------------------------------------------
+
+  it "bumping a locked door without the matching key raises the prompt and costs no turn" $ do
+    let kid      = KeyId 0
+        doorPos  = V2 2 1
+        doorIdx  = 1 * 5 + 2
+        withDoor = tinyRoom
+          { dlTiles = dlTiles tinyRoom V.// [(doorIdx, Door (Locked kid))] }
+        rat      = ratAt (V2 3 3)
+        gs       = (mkFixture 1 (V2 2 2) overpoweredPlayer [rat])
+                     { gsLevel = withDoor }
+        gs'      = applyAction (Move N) gs
+    -- Prompt set, door untouched, player unmoved.
+    gsLockedDoorPrompt gs' `shouldBe` Just (keyName kid)
+    tileAt (gsLevel gs') doorPos `shouldBe` Just (Door (Locked kid))
+    gsPlayerPos gs' `shouldBe` V2 2 2
+    -- Monster phase did NOT run: rat still at (3,3).
+    map mPos (gsMonsters gs') `shouldBe` [V2 3 3]
+
+  it "bumping a locked door with the matching key consumes it and opens the door" $ do
+    let kid      = KeyId 0
+        doorPos  = V2 2 1
+        doorIdx  = 1 * 5 + 2
+        withDoor = tinyRoom
+          { dlTiles = dlTiles tinyRoom V.// [(doorIdx, Door (Locked kid))] }
+        inv      = emptyInventory { invItems = [IKey kid] }
+        gs       = (mkFixture 1 (V2 2 2) overpoweredPlayer [])
+                     { gsLevel = withDoor, gsInventory = inv }
+        gs'      = applyAction (Move N) gs
+    -- Door is now open, key is gone, prompt stayed unset.
+    tileAt (gsLevel gs') doorPos `shouldBe` Just (Door Open)
+    invItems (gsInventory gs') `shouldBe` []
+    gsLockedDoorPrompt gs' `shouldBe` Nothing
+    -- Same semantics as bumping a closed door: player stays put this
+    -- turn (the open consumes the move) but the turn advanced.
+    gsPlayerPos gs' `shouldBe` V2 2 2
+
+  it "a non-matching key does not open a locked door" $ do
+    let kidLock  = KeyId 0
+        kidBag   = KeyId 1
+        doorPos  = V2 2 1
+        doorIdx  = 1 * 5 + 2
+        withDoor = tinyRoom
+          { dlTiles = dlTiles tinyRoom V.// [(doorIdx, Door (Locked kidLock))] }
+        inv      = emptyInventory { invItems = [IKey kidBag] }
+        gs       = (mkFixture 1 (V2 2 2) overpoweredPlayer [])
+                     { gsLevel = withDoor, gsInventory = inv }
+        gs'      = applyAction (Move N) gs
+    tileAt (gsLevel gs') doorPos `shouldBe` Just (Door (Locked kidLock))
+    gsLockedDoorPrompt gs' `shouldBe` Just (keyName kidLock)
+    invItems (gsInventory gs') `shouldBe` [IKey kidBag]
 
   it "a door opened on turn N is walkable on turn N+1" $ do
     -- Same setup, but this time take a second move step after the
@@ -582,6 +640,55 @@ spec = describe "Game.GameState.applyAction / event emission" $ do
     case decodeSave (encodeSave gs0) of
       Right gs' -> gsCheatsUsed gs' `shouldBe` False
       Left e    -> expectationFailure ("decode failed: " ++ show e)
+
+  -- ----------------------------------------------------------------
+  -- Softlock safety: when 'newGame' mints a locked door on depth 1,
+  -- the matching key must be placed on the spawn-side of that door.
+  -- We scan many seeds rather than asserting against a single known
+  -- lock-bearing seed, so drift in the generator doesn't silently
+  -- hide a regression.
+  -- ----------------------------------------------------------------
+
+  describe "newGame locked-door key reachability" $
+    it "every minted key lands on a tile reachable from spawn without opening any lock" $ do
+      -- 200 seeds is plenty to hit plenty of lock rolls (~50% rate)
+      -- while staying well under a second.
+      let seeds         = [0 .. 199 :: Int]
+          results       = map run seeds
+          failures      = filter (not . snd) results
+      failures `shouldBe` []
+      where
+        run seed =
+          let gs        = newGame (mkStdGen seed) defaultLevelConfig
+              dl        = gsLevel gs
+              start     = gsPlayerPos gs
+              reachable = keylessFlood dl start
+              keyTiles  = [ p | (p, IKey _) <- gsItemsOnFloor gs ]
+              hasLock   = any isLockedDoor (V.toList (dlTiles dl))
+              -- Either the level has no lock (trivially satisfied),
+              -- or every dropped key is on the spawn-side set.
+              ok = not hasLock
+                || all (`Set.member` reachable) keyTiles
+          in (seed, ok)
+
+        isLockedDoor (Door (Locked _)) = True
+        isLockedDoor _                 = False
+
+        -- Local flood fill mirroring 'spawnSideReachable' — treats
+        -- walls and locked doors as impassable, every other tile as
+        -- passable.
+        keylessFlood dl start = go (Set.singleton start) [start]
+          where
+            passable p = case tileAt dl p of
+              Just Wall              -> False
+              Just (Door (Locked _)) -> False
+              Just _                 -> True
+              Nothing                -> False
+            go visited []       = visited
+            go visited (p : qs) =
+              let ns    = [ p + V2 0 (-1), p + V2 0 1, p + V2 1 0, p + V2 (-1) 0 ]
+                  fresh = [ n | n <- ns, not (Set.member n visited), passable n ]
+              in go (foldr Set.insert visited fresh) (qs ++ fresh)
 
 -- | Build a test NPC with two starter offers, placed at the
 --   given position.

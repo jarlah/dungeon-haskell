@@ -5,6 +5,7 @@ module Game.Render
   , npcAttr
   , bossAttr
   , doorAttr
+  , lockedDoorAttr
   , saveMenuCursorAttr
   , saveMenuEmptyAttr
   , launchCursorAttr
@@ -64,6 +65,12 @@ bossAttr = attrName "boss"
 --   to lose against a dungeon wall without a color cue.
 doorAttr :: AttrName
 doorAttr = attrName "door"
+
+-- | Attribute name used for locked doors. Main wires this to a red
+--   foreground so a locked door reads as hostile/impassable at a
+--   glance, without needing a distinct glyph.
+lockedDoorAttr :: AttrName
+lockedDoorAttr = attrName "lockedDoor"
 
 -- | Attribute name for the highlighted cursor row in the save/load
 --   modal. Main wires this to a reverse-video attribute so the
@@ -133,6 +140,8 @@ drawGame wizardEnabled gs =
            | Just sm <- gsSaveMenu gs -> [drawSaveMenuModal sm, baseLayer]
            | gsQuestLogOpen gs  -> [drawQuestLogModal gs, baseLayer]
            | gsInventoryOpen gs -> [drawInventoryModal gs, baseLayer]
+           | Just keyNm <- gsLockedDoorPrompt gs ->
+               [drawLockedDoorModal keyNm, baseLayer]
            | otherwise          -> withRoomPanel [baseLayer]
   where
     nthMaybe n xs
@@ -193,23 +202,27 @@ visibleCell gs pos
   | otherwise =
       let glyph = tileGlyph (gsLevel gs) pos
           -- Doors get their own color so @'@ and @+@ don't get
-          -- lost against the floor/wall glyphs.
+          -- lost against the floor/wall glyphs. Locked doors use
+          -- a distinct attr so the player can tell at a glance
+          -- that bumping them will need a key.
           wrap = case tileAt (gsLevel gs) pos of
-            Just (Door _) -> withAttr doorAttr
-            _             -> id
+            Just (Door (Locked _)) -> withAttr lockedDoorAttr
+            Just (Door _)          -> withAttr doorAttr
+            _                      -> id
       in wrap (str [glyph])
 
 -- | Glyph for the terrain at a position, without the player or
 --   monsters overlaid. Used for both visible and fogged rendering.
 tileGlyph :: DungeonLevel -> Pos -> Char
 tileGlyph dl pos = case tileAt dl pos of
-  Just Floor         -> '.'
-  Just Wall          -> '#'
-  Just (Door Open)   -> '\''
-  Just (Door Closed) -> '+'
-  Just StairsDown    -> '>'
-  Just StairsUp      -> '<'
-  Nothing            -> ' '
+  Just Floor              -> '.'
+  Just Wall               -> '#'
+  Just (Door Open)        -> '\''
+  Just (Door Closed)      -> '+'
+  Just (Door (Locked _))  -> '+'
+  Just StairsDown         -> '>'
+  Just StairsUp           -> '<'
+  Nothing                 -> ' '
 
 drawStatus :: GameState -> Widget Name
 drawStatus gs =
@@ -400,6 +413,22 @@ drawQuitConfirmModal =
         , str ""
         , str "  y : yes, quit"
         , str "  n / Esc : keep playing"
+        ]
+
+-- | Modal shown when the player bumps a locked door without the
+--   matching key. The name is the already-formatted key name
+--   (e.g. "brass key"); the modal exists purely to tell the
+--   player /which/ key they need, and any keystroke dismisses it
+--   via 'handleLockedDoorKey'.
+drawLockedDoorModal :: String -> Widget Name
+drawLockedDoorModal keyNm =
+  centerLayer
+    $ borderWithLabel (str " Locked ")
+    $ padAll 1
+    $ vBox
+        [ str ("This door is locked. It needs the " ++ keyNm ++ ".")
+        , str ""
+        , str "  (press any key to continue)"
         ]
 
 -- | Save / load picker modal. Renders the slot list as a vertical
