@@ -1,0 +1,14 @@
+{
+  "haskell.manageHLS": "PATH",
+  "haskell.toolchain": {
+    "hls": null,
+    "ghc": null,
+    "cabal": null,
+    "stack": null
+  },
+  "files.watcherExclude": {
+    "**/.stack-work/**": true,
+    "**/.stack-work-docker/**": true,
+    "**/.direnv/**": true
+  }
+}
