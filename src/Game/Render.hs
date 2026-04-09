@@ -241,8 +241,15 @@ drawInventoryModal gs =
 drawDialogueModal :: [Quest] -> Int -> NPC -> Widget ()
 drawDialogueModal quests npcIdx npc =
   let ready = [ q | q <- quests, qStatus q == QuestReadyToTurnIn ]
+      -- Prefer the AI-generated greeting when we have one cached;
+      -- fall back to the hardcoded line otherwise. This is the only
+      -- place the two fields are disambiguated — everyone else just
+      -- sees "the greeting for this NPC".
+      greetingLine = case npcAIGreet npc of
+        Just g  -> g
+        Nothing -> npcGreeting npc
       header =
-        [ "\"" ++ npcGreeting npc ++ "\""
+        [ "\"" ++ greetingLine ++ "\""
         , ""
         ]
       readySection = case ready of

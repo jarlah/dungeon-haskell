@@ -33,12 +33,13 @@
 --     much higher bar than opening it in a text editor.
 --
 --   * **Magic header.** Every save begins with the 8-byte ASCII
---     sequence @DHSAVE01@ (Dungeon Haskell SAVE, format version 01).
---     The version trails the magic so that bumping the save format
---     across a schema change is a single-byte patch and old saves
---     get rejected cleanly with 'SaveWrongVersion' instead of silently
---     decoding into garbage. There is no migration path in v1 —
---     hobby-project tradeoff.
+--     sequence @DHSAVE\<vv\>@ (Dungeon Haskell SAVE, format version
+--     \<vv\>). The current version is @DHSAVE02@. The version trails
+--     the magic so that bumping the save format across a schema
+--     change is a single-byte patch and old saves get rejected
+--     cleanly with 'SaveWrongVersion' instead of silently decoding
+--     into garbage. There is no migration path — hobby-project
+--     tradeoff.
 --
 --   * **Atomic writes.** 'writeSave' encodes to a @\<slot\>.save.tmp@
 --     tempfile, @hFlush@es, then 'renameFile's over the target. A

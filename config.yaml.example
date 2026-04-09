@@ -1,0 +1,48 @@
+# dungeon-haskell — example configuration
+#
+# Copy this file to one of the paths the game searches for on startup,
+# in order of preference:
+#
+#   1. The path passed via the --config CLI flag
+#   2. ./config.yaml (current working directory)
+#   3. $XDG_CONFIG_HOME/dungeon-haskell/config.yaml
+#      (usually ~/.config/dungeon-haskell/config.yaml on Linux)
+#
+# Every key is optional — omit a section or field and the game falls
+# back to its built-in defaults. The values shown below are those
+# defaults, so running with this exact file is identical to running
+# with no config file at all.
+
+# LLM-powered content generation (Milestone 14). When disabled the
+# game ships with pre-written content and never contacts the network.
+ai:
+  # Master switch. Keep at `false` for a fully offline game.
+  enabled: false
+
+  # Which backend to speak to. One of:
+  #   mock   — in-process canned responses (no network, deterministic)
+  #   ollama — a local Ollama /api/generate endpoint
+  #   openai — an OpenAI-compatible /v1/chat/completions endpoint
+  #            (works with LM Studio, proxies, etc.)
+  provider: mock
+
+  # Full URL for the provider. Ignored by the mock backend.
+  endpoint: "http://localhost:11434/api/generate"
+
+  # Bearer token. Leave empty for local Ollama (no auth).
+  api_key: ""
+
+  # Model identifier passed to the backend.
+  model: "mistral"
+
+  # Per-request timeout in seconds.
+  timeout_seconds: 15
+
+  # How many times to retry a failed request before falling back
+  # to hardcoded content. Retries use exponential backoff.
+  max_retries: 3
+
+# Audio volumes. Both are multipliers in [0.0, 1.0].
+audio:
+  music_volume: 0.7
+  sfx_volume: 1.0

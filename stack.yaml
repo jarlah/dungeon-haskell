@@ -33,11 +33,26 @@ nix:
     - gmp
     - SDL2
     - pkg-config
+    # Milestone 14: http-tower-hs pulls in http-client, which pulls
+    # in zlib (Haskell binding to libz). The Haskell package needs
+    # libz.so at link time, so make it available via nix-shell.
+    - zlib
 
 # Extra dependencies not in the LTS snapshot.
 extra-deps:
   - proteaaudio-0.10.1
   - proteaaudio-sdl-0.10.1
+  # Milestone 14: Game.AI.Client is built on http-tower-hs for
+  # retry / timeout middleware. The package is published on Hackage
+  # but is not yet part of the LTS 24 Stackage snapshot, so stack
+  # needs an explicit version pin here. Ditto for its transitive
+  # deps that also aren't in the snapshot (tower-hs,
+  # hs-opentelemetry-api, thread-utils-context).
+  - http-tower-hs-0.3.1.0
+  - tower-hs-0.3.0.1
+  - hs-opentelemetry-api-0.3.1.0
+  - thread-utils-context-0.3.0.4
+  - thread-utils-finalizers-0.1.1.0
 
 # proteaaudio / proteaaudio-sdl 0.10.1 caps bytestring at <0.12, but
 # LTS 24 ships bytestring 0.12.2.0. Bump just those two packages.

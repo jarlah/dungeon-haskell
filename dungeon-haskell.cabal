@@ -48,6 +48,15 @@ library
     Game.Audio
     Game.Save.Types
     Game.Save
+    Game.Config
+    Game.AI.Types
+    Game.AI.Client
+    Game.AI.Prompts
+    Game.AI.QuestGen
+    Game.AI.NPCBehaviour
+    Game.AI.LevelContent
+    Game.AI.Mock
+    Game.AI.Async
   build-depends:
     , linear
     , vector
@@ -64,6 +73,15 @@ library
     , time
     , filepath
     , splitmix
+    , yaml
+    , aeson
+    , text
+    , http-client
+    , http-client-tls
+    , http-types
+    , http-tower-hs
+    , async
+    , stm
 
 executable dungeon-haskell
   import:              shared
@@ -76,6 +94,7 @@ executable dungeon-haskell
     , vty-crossplatform
     , mtl
     , random
+    , text
   ghc-options:         -threaded -rtsopts
 
 test-suite dungeon-haskell-test
@@ -95,6 +114,10 @@ test-suite dungeon-haskell-test
     Game.Logic.QuestSpec
     Game.GameStateSpec
     Game.SaveSpec
+    Game.ConfigSpec
+    Game.AI.ClientSpec
+    Game.AI.QuestGenSpec
+    Game.AI.MockSpec
   build-depends:
     , dungeon-haskell
     , hspec
@@ -106,6 +129,11 @@ test-suite dungeon-haskell-test
     , bytestring
     , binary
     , temporary
+    , text
+    , aeson
+    , yaml
+    , directory
+    , filepath
   build-tool-depends:
     hspec-discover:hspec-discover
   ghc-options:         -threaded -rtsopts

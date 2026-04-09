@@ -268,7 +268,16 @@ data NPC = NPC
     -- ^ display name shown in the dialogue header
   , npcPos      :: !Pos
   , npcGreeting :: !String
-    -- ^ one-line flavor text shown at the top of the dialogue
+    -- ^ hardcoded fallback greeting. Always present so the dialogue
+    --   is displayable even with AI disabled, the backend down, or
+    --   the response still in flight.
+  , npcAIGreet  :: !(Maybe String)
+    -- ^ LLM-generated replacement greeting, cached per NPC. The
+    --   render layer prefers this over 'npcGreeting' whenever it's
+    --   'Just', so a single successful AI reply sticks for the rest
+    --   of the session. 'Nothing' means the request hasn't been
+    --   fired yet, is still in flight, or failed — in any of those
+    --   cases we fall back to 'npcGreeting'.
   , npcOffers   :: ![Quest]
     -- ^ quests the NPC has to give. Each entry has status
     --   'QuestNotStarted'; accepting a quest removes it from this
@@ -376,6 +385,7 @@ spawnNPCs gen depth rooms
               { npcName     = "Quest Master"
               , npcPos      = p
               , npcGreeting = "Greetings, traveler. I have work for those willing."
+              , npcAIGreet  = Nothing
               , npcOffers   =
                   [ (mkOffer "Slayer"        (GoalKillMonsters 5)) { qReward = 50 }
                   , (mkOffer "Delve"         (GoalReachDepth 3))   { qReward = 75 }

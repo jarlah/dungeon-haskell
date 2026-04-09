@@ -262,6 +262,7 @@ spec = describe "Game.GameState.applyAction / event emission" $ do
           { npcName     = "Stranger"
           , npcPos      = V2 3 3
           , npcGreeting = "Well met."
+          , npcAIGreet  = Nothing
           , npcOffers   = []
           }
         rat      = ratAt (V2 2 1)
@@ -403,6 +404,7 @@ mkQuestMaster p = NPC
   { npcName     = "Quest Master"
   , npcPos      = p
   , npcGreeting = "Hello."
+  , npcAIGreet  = Nothing
   , npcOffers   =
       [ (mkQuest "Slayer" (GoalKillMonsters 5)) { qStatus = QuestNotStarted }
       , (mkQuest "Delve"  (GoalReachDepth   3)) { qStatus = QuestNotStarted }

@@ -1,15 +1,26 @@
 module Main (main) where
 
 import Brick
+import qualified Brick.BChan               as BChan
 import Control.Exception (bracket)
+import Control.Monad (when)
 import Control.Monad.IO.Class (liftIO)
+import Data.IORef (IORef, newIORef, atomicModifyIORef')
+import qualified Data.Text as T
 import qualified Graphics.Vty as V
 import qualified Graphics.Vty.CrossPlatform as VCP
+import System.IO (hPutStrLn, stderr)
 import System.Random (newStdGen)
 
 import Data.Char (ord)
 
+import qualified Game.AI.Async  as AIAsync
+import qualified Game.AI.Client as AIClient
+import qualified Game.AI.Prompts as AIPrompts
+import           Game.AI.Types  (AIRequest (..), AIResponse (..))
 import qualified Game.Audio as Audio
+import qualified Game.Config as Config
+import           Game.Config (AIConfig (..), GameConfig (..))
 import Game.GameState
 import Game.Input (handleKey)
 import Game.Logic.Command (parseCommand)
@@ -22,15 +33,55 @@ import Game.Render
   )
 import qualified Game.Save as Save
 import Game.Save.Types (SaveMetadata(..))
-import Game.Types (GameAction(..), Inventory(..))
+import Game.Types (DungeonLevel(..), GameAction(..), Inventory(..))
 
--- | Build the Brick 'App' with audio closed into the event handler.
---   Passing 'Nothing' disables audio playback (silent run).
-mkApp :: Maybe Audio.AudioSystem -> App GameState e ()
-mkApp mAudio = App
+-- | Runtime wiring for the AI subsystem. Bundled together so the
+--   event loop only has to close over one value and so shutdown can
+--   tear the whole thing down in one 'bracket' exit action.
+--
+--   Held outside 'GameState' because none of it is safe to
+--   serialize: the worker thread handle is process-local, the config
+--   is read-only, and the in-flight set would become stale the
+--   moment a save was loaded. A fresh 'AIRuntime' is built once at
+--   startup and lives until the app exits.
+data AIRuntime = AIRuntime
+  { aiCfg        :: !AIConfig
+  , aiClient     :: !AIClient.AIClient
+  , aiWorker     :: !AIAsync.AIWorker
+  , aiPending    :: !(IORef [(Int, Int)])
+    -- ^ NPC slots (depth, npcIndex) with a greeting request currently
+    --   in flight. Kept as a plain list — we only ever have a handful
+    --   at once — and consulted before firing a new request so the
+    --   worker queue doesn't fill up with duplicates for the same
+    --   NPC if the player bumps into them repeatedly while a reply
+    --   is still coming back.
+  , aiNextToken  :: !(IORef Int)
+    -- ^ monotonic token counter used to tag 'AIRequest' values so
+    --   the response handler can match them back to their site.
+  , aiTokenMap   :: !(IORef [(Int, (Int, Int))])
+    -- ^ maps a live correlation token back to the (depth, npcIndex)
+    --   it was fired for. Populated when a request is submitted and
+    --   drained when the response lands.
+  }
+
+-- | The Brick custom-event type for this app. 'AIResult' carries a
+--   completed 'AIResponse' from the worker thread back to the main
+--   event loop via a 'Brick.BChan.BChan'; the event loop then folds
+--   it into 'GameState'.
+data AppEvent
+  = AIResult !AIResponse
+  deriving (Show)
+
+-- | Build the Brick 'App' with the audio shell and AI runtime
+--   closed into the event handler. Passing 'Nothing' for the audio
+--   system disables audio playback (silent run). The 'AIRuntime' is
+--   always supplied — its own config decides whether requests
+--   actually fire.
+mkApp :: Maybe Audio.AudioSystem -> AIRuntime -> App GameState AppEvent ()
+mkApp mAudio aiRt = App
   { appDraw         = drawGame
   , appChooseCursor = showFirstCursor
-  , appHandleEvent  = handleEvent mAudio
+  , appHandleEvent  = handleEvent mAudio aiRt
   , appStartEvent   = pure ()
   , appAttrMap      = const $ attrMap V.defAttr
       [ (fogAttr,             fg V.brightBlack)
@@ -44,8 +95,12 @@ mkApp mAudio = App
       ]
   }
 
-handleEvent :: Maybe Audio.AudioSystem -> BrickEvent () e -> EventM () GameState ()
-handleEvent mAudio (VtyEvent (V.EvKey key mods)) = do
+handleEvent
+  :: Maybe Audio.AudioSystem
+  -> AIRuntime
+  -> BrickEvent () AppEvent
+  -> EventM () GameState ()
+handleEvent mAudio aiRt (VtyEvent (V.EvKey key mods)) = do
   gs <- get
   case () of
     -- Launch screen swallows everything — the player is not yet
@@ -57,15 +112,22 @@ handleEvent mAudio (VtyEvent (V.EvKey key mods)) = do
       | gsHelpOpen gs               -> handleHelpKey key
       | Just sm  <- gsSaveMenu gs   -> handleSaveMenuKey sm key
       | Just buf <- gsPrompt gs     -> handlePromptKey key buf
-      | Just i   <- gsDialogue gs   -> handleDialogueKey mAudio i key
+      | Just i   <- gsDialogue gs   -> handleDialogueKey mAudio aiRt i key
       | gsQuestLogOpen gs           -> handleQuestLogKey key
       | gsInventoryOpen gs          -> handleInventoryKey mAudio key
-      | otherwise                   -> handleNormalKey mAudio key mods
+      | otherwise                   -> handleNormalKey mAudio aiRt key mods
   -- Every key event is an opportunity to swap music tracks — the
   -- player may have just walked into the boss room's line of sight,
   -- or descended onto the boss floor, or climbed back off it.
   updateMusicFor mAudio
-handleEvent _ _ = pure ()
+  -- If that keystroke opened a dialogue with an NPC we haven't
+  -- generated a greeting for yet, fire the request now. Safe to
+  -- call unconditionally — the helper is a no-op when AI is
+  -- disabled or the greeting is already cached.
+  maybeFireGreeting aiRt
+handleEvent _ aiRt (AppEvent (AIResult resp)) =
+  applyAIResponse aiRt resp
+handleEvent _ _ _ = pure ()
 
 -- | Consult the current 'GameState' and tell the audio shell which
 --   music loop should be playing. The decision is delegated to
@@ -141,10 +203,15 @@ handleQuestLogKey _ = pure ()
 --   the modal without any action. Monsters do not act either way
 --   — peaceful conversation is a free action, as is collecting
 --   quest rewards.
-handleDialogueKey :: Maybe Audio.AudioSystem -> Int -> V.Key -> EventM () GameState ()
-handleDialogueKey _ _ V.KEsc =
+handleDialogueKey
+  :: Maybe Audio.AudioSystem
+  -> AIRuntime
+  -> Int
+  -> V.Key
+  -> EventM () GameState ()
+handleDialogueKey _ _ _ V.KEsc =
   modify (\gs -> gs { gsDialogue = Nothing })
-handleDialogueKey mAudio npcIdx (V.KChar c)
+handleDialogueKey mAudio _ npcIdx (V.KChar c)
   | c >= 'a' && c <= 'z' = do
       gs <- get
       let offerIdx = ord c - ord 'a'
@@ -169,7 +236,7 @@ handleDialogueKey mAudio npcIdx (V.KChar c)
           playEventsFor mAudio
           autoCloseIfIdle npcIdx
         else pure ()
-handleDialogueKey _ _ _ = pure ()
+handleDialogueKey _ _ _ _ = pure ()
 
 -- | Close the dialogue modal if the NPC has no remaining offers
 -- /and/ the player has no further quests ready to hand in here.
@@ -236,26 +303,31 @@ handlePromptKey key buf = case key of
 -- | Keystrokes while the prompt is closed. @/@ opens the prompt;
 --   @i@ opens the inventory modal; everything else goes through the
 --   normal action keymap.
-handleNormalKey :: Maybe Audio.AudioSystem -> V.Key -> [V.Modifier] -> EventM () GameState ()
-handleNormalKey _ (V.KChar '/') _ =
+handleNormalKey
+  :: Maybe Audio.AudioSystem
+  -> AIRuntime
+  -> V.Key
+  -> [V.Modifier]
+  -> EventM () GameState ()
+handleNormalKey _ _ (V.KChar '/') _ =
   modify (\gs -> gs { gsPrompt = Just "" })
-handleNormalKey _ (V.KChar '?') _ =
+handleNormalKey _ _ (V.KChar '?') _ =
   modify (\gs -> gs { gsHelpOpen = True })
-handleNormalKey _ (V.KChar 'i') _ =
+handleNormalKey _ _ (V.KChar 'i') _ =
   modify (\gs -> gs { gsInventoryOpen = True })
-handleNormalKey _ (V.KChar 'Q') _ =
+handleNormalKey _ _ (V.KChar 'Q') _ =
   modify (\gs -> gs { gsQuestLogOpen = True, gsQuestLogCursor = Nothing })
 -- Quicksave (F5) and quickload (F9) are free actions: they do not
 -- advance monsters and do not run through 'applyAction' — they
 -- talk directly to the filesystem and report into 'gsMessages'.
-handleNormalKey _ (V.KFun 5) _ = doQuicksave
-handleNormalKey _ (V.KFun 9) _ = doQuickload
+handleNormalKey _ _ (V.KFun 5) _ = doQuicksave
+handleNormalKey _ _ (V.KFun 9) _ = doQuickload
 -- F2 / F3 open the full save and load picker modals respectively.
 -- Both take a snapshot of the save directory at open time so the
 -- entry list doesn't shift under the cursor mid-menu.
-handleNormalKey _ (V.KFun 2) _ = openSaveMenu SaveMode
-handleNormalKey _ (V.KFun 3) _ = openSaveMenu LoadMode
-handleNormalKey mAudio key mods =
+handleNormalKey _ _ (V.KFun 2) _ = openSaveMenu SaveMode
+handleNormalKey _ _ (V.KFun 3) _ = openSaveMenu LoadMode
+handleNormalKey mAudio _ key mods =
   case handleKey key mods of
     Just Quit ->
       -- Don't halt immediately — open a confirm modal. q and Q
@@ -632,8 +704,157 @@ deleteAt sm idx = case drop idx (smSlots sm) of
             , gsMessages = ("Deleted " ++ sseSlotLabel entry ++ ".") : gsMessages gs
             }
 
+--------------------------------------------------------------------
+-- AI runtime: startup, shutdown, request / response handling
+--------------------------------------------------------------------
+
+-- | Spin up the AI runtime. Builds the client, opens the worker
+--   thread, and returns everything the event loop needs. The caller
+--   is expected to pair this with 'stopAIRuntime' via 'bracket' so
+--   the worker thread and any underlying resources are torn down
+--   cleanly on exit (including on @Ctrl-C@).
+--
+--   Takes the Brick 'BChan.BChan' the worker should emit responses
+--   into so the event loop picks them up alongside key events.
+startAIRuntime :: GameConfig -> BChan.BChan AppEvent -> IO AIRuntime
+startAIRuntime gc chan = do
+  let cfg = gcAI gc
+  client  <- AIClient.newAIClient cfg
+  pending <- newIORef []
+  tokRef  <- newIORef 0
+  mapRef  <- newIORef []
+  worker  <- AIAsync.startAIWorker client cfg $ \resp ->
+    BChan.writeBChan chan (AIResult resp)
+  pure AIRuntime
+    { aiCfg       = cfg
+    , aiClient    = client
+    , aiWorker    = worker
+    , aiPending   = pending
+    , aiNextToken = tokRef
+    , aiTokenMap  = mapRef
+    }
+
+-- | Tear down the AI runtime. Idempotent — safe to call during
+--   cleanup even if startup partially failed.
+stopAIRuntime :: AIRuntime -> IO ()
+stopAIRuntime rt = do
+  AIAsync.stopAIWorker (aiWorker rt)
+  AIClient.closeAIClient (aiClient rt)
+
+-- | If the player is currently in a dialogue with an NPC that has
+--   no cached AI greeting yet, fire a greeting request. Guards
+--   against duplicate fires via 'aiPending' so that rapid reopens
+--   of the same dialogue produce at most one inflight request.
+--
+--   Called after every keystroke — most of the time it's a no-op
+--   because either the dialogue is closed, AI is disabled, or the
+--   greeting is already cached. The cost of checking is a few
+--   pattern matches.
+maybeFireGreeting :: AIRuntime -> EventM () GameState ()
+maybeFireGreeting rt
+  | not (aiEnabled (aiCfg rt)) = pure ()
+  | otherwise = do
+      gs <- get
+      case gsDialogue gs of
+        Nothing      -> pure ()
+        Just npcIdx  -> case drop npcIdx (gsNPCs gs) of
+          []        -> pure ()
+          (npc : _) -> case npcAIGreet npc of
+            Just _  -> pure ()  -- already cached
+            Nothing -> do
+              let depth = dlDepth (gsLevel gs)
+                  slot  = (depth, npcIdx)
+              already <- liftIO $ atomicModifyIORef' (aiPending rt) $ \ps ->
+                if slot `elem` ps
+                  then (ps, True)
+                  else (slot : ps, False)
+              when (not already) $ liftIO $ do
+                tok <- atomicModifyIORef' (aiNextToken rt) $ \n -> (n + 1, n + 1)
+                atomicModifyIORef' (aiTokenMap rt) $ \m -> ((tok, slot) : m, ())
+                let prompt = AIPrompts.greetingPrompt
+                        (T.pack (npcName npc))
+                        (T.pack (describeNPCRole npc))
+                        depth
+                AIAsync.requestAI (aiWorker rt) (ReqGreeting tok prompt)
+
+-- | Flatten an NPC into a short role string the greeting prompt can
+--   key its flavor off. For the MVP every NPC is the Quest Master,
+--   so this is essentially a constant — but it's a single point of
+--   change when new NPC kinds land.
+describeNPCRole :: NPC -> String
+describeNPCRole _ = "Quest Master"
+
+-- | Fold a completed AI response into 'GameState'. For greetings
+--   this is: find the NPC the request was fired for and stamp the
+--   cleaned reply into its 'npcAIGreet' field. For other response
+--   types it's a no-op right now — the infrastructure is in place
+--   for when quest / room-description integrations land, but the
+--   current wiring only fires greeting requests.
+--
+--   Unknown or stale tokens (for example, a response that arrives
+--   after a save was loaded and the token map was wiped) are
+--   silently dropped — they're cosmetic.
+applyAIResponse :: AIRuntime -> AIResponse -> EventM () GameState ()
+applyAIResponse rt resp = case resp of
+  RespGreeting tok (Right greetTxt) -> do
+    mSlot <- liftIO $ atomicModifyIORef' (aiTokenMap rt) $ \m ->
+      case lookup tok m of
+        Just s  -> (filter ((/= tok) . fst) m, Just s)
+        Nothing -> (m, Nothing)
+    liftIO $ atomicModifyIORef' (aiPending rt) $ \ps ->
+      case mSlot of
+        Just s  -> (filter (/= s) ps, ())
+        Nothing -> (ps, ())
+    case mSlot of
+      Nothing -> pure ()
+      Just (depth, npcIdx) -> do
+        gs <- get
+        -- Only fold the reply in if the player is still on the same
+        -- floor. Descending invalidates the NPC index, so a late
+        -- reply for a previous floor's NPC would otherwise paint
+        -- itself onto whoever is now at that index.
+        when (dlDepth (gsLevel gs) == depth) $
+          modify (updateNPCGreet npcIdx (T.unpack greetTxt))
+  RespGreeting tok (Left _) -> do
+    -- Failure: clear the bookkeeping so a retry is possible next
+    -- time the player re-enters the dialogue. The greeting field
+    -- stays 'Nothing', so the fallback line keeps showing.
+    mSlot <- liftIO $ atomicModifyIORef' (aiTokenMap rt) $ \m ->
+      case lookup tok m of
+        Just s  -> (filter ((/= tok) . fst) m, Just s)
+        Nothing -> (m, Nothing)
+    liftIO $ atomicModifyIORef' (aiPending rt) $ \ps ->
+      case mSlot of
+        Just s  -> (filter (/= s) ps, ())
+        Nothing -> (ps, ())
+  RespQuest{}    -> pure ()  -- not wired into gameplay yet
+  RespRoomDesc{} -> pure ()  -- not wired into gameplay yet
+
+-- | Stamp a cleaned greeting string into the NPC at the given index.
+--   No-op if the index is out of range (stale token, NPC despawned).
+updateNPCGreet :: Int -> String -> GameState -> GameState
+updateNPCGreet idx g gs =
+  let updated = zipWith (\i n -> if i == idx then n { npcAIGreet = Just g } else n)
+                        [0 ..]
+                        (gsNPCs gs)
+  in gs { gsNPCs = updated }
+
+--------------------------------------------------------------------
+-- main
+--------------------------------------------------------------------
+
 main :: IO ()
 main = do
+  -- Config first: a bad config file should fail loudly and early
+  -- rather than partially running the game with surprise defaults.
+  cfgRes <- Config.loadConfig Nothing
+  gameCfg <- case cfgRes of
+    Right c  -> pure c
+    Left err -> do
+      hPutStrLn stderr ("Warning: " <> err)
+      hPutStrLn stderr "Continuing with default configuration."
+      pure Config.defaultGameConfig
+
   gen <- newStdGen
   hasSaves <- sampleHasSaves
   -- The initial state is a fresh run with the launch screen
@@ -649,11 +870,20 @@ main = do
             }
         }
       buildVty = VCP.mkVty V.defaultConfig
+
+  -- A Brick 'BChan' bridges the AI worker thread and the main event
+  -- loop: the worker emits 'AIResult' events, the event loop pulls
+  -- them off alongside VtyEvents via 'customMain'.
+  aiChan <- BChan.newBChan 16
+
   -- Audio init is best-effort: if it fails (no device, missing
   -- assets, ...), 'bracket' still runs the game silently.
   bracket Audio.initAudio
           (mapM_ Audio.shutdownAudio)
-          $ \mAudio -> do
-    initialVty <- buildVty
-    _ <- customMain initialVty buildVty Nothing (mkApp mAudio) initialState
-    pure ()
+          $ \mAudio ->
+    bracket (startAIRuntime gameCfg aiChan)
+            stopAIRuntime
+            $ \aiRt -> do
+      initialVty <- buildVty
+      _ <- customMain initialVty buildVty (Just aiChan) (mkApp mAudio aiRt) initialState
+      pure ()

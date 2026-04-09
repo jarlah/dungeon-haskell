@@ -22,7 +22,6 @@ import           Test.Hspec
 
 import           Game.GameState          (GameState(..), hardcodedInitialState)
 import           Game.Save
-import           Game.Save.Types
 
 spec :: Spec
 spec = do
@@ -71,8 +70,8 @@ spec = do
           expectationFailure
             ("expected SaveCorrupt, got: " ++ show other)
 
-    it "saveMagic is exactly DHSAVE01" $
-      saveMagic `shouldBe` BL8.pack "DHSAVE01"
+    it "saveMagic is exactly DHSAVE02" $
+      saveMagic `shouldBe` BL8.pack "DHSAVE02"
 
   describe "slotFileName / slotFromFileName" $ do
 

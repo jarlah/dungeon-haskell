@@ -77,5 +77,12 @@ instance Binary SaveMetadata
 --   first six bytes are the format tag, the last two are an ASCII
 --   version number. Bumping the format version rejects every save
 --   written by an older build of the game.
+--
+--   Version history:
+--
+--   * @DHSAVE01@ — Milestones 1–13. Pre-AI schema.
+--   * @DHSAVE02@ — Milestone 14. 'NPC' gained the optional
+--     'npcAIGreet' cache field, which changes the derived Binary
+--     encoding for every 'GameState' that contains an NPC list.
 saveMagic :: BL.ByteString
-saveMagic = BL8.pack "DHSAVE01"
+saveMagic = BL8.pack "DHSAVE02"
