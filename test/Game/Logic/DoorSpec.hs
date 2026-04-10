@@ -10,7 +10,8 @@ import Game.Types
   )
 import Game.State.Types (NPC(..))
 import Game.Logic.Dungeon (Room(..))
-import Game.Logic.Door (openDoorAt, closeDoorAt, dashSteps)
+import Game.Logic.Door (openDoorAt, closeDoorAt)
+import Game.Logic.Movement (DashContext(..), dashSteps)
 
 -- | 5x5 room with walls around the border, floor inside.
 tinyLevel :: DungeonLevel
@@ -29,6 +30,15 @@ withClosedDoor :: DungeonLevel
 withClosedDoor =
   let idx = 1 * 5 + 2  -- y=1, x=2
   in tinyLevel { dlTiles = dlTiles tinyLevel V.// [(idx, Door Closed)] }
+
+mkDashCtx :: DungeonLevel -> Pos -> DashContext
+mkDashCtx dl pos = DashContext
+  { dcLevel     = dl
+  , dcMonsters  = []
+  , dcNPCs      = []
+  , dcItems     = []
+  , dcPlayerPos = pos
+  }
 
 spec :: Spec
 spec = do
@@ -52,28 +62,26 @@ spec = do
       tileAt lvl' (V2 2 1) `shouldBe` Just (Door Closed)
 
   describe "dashSteps" $ do
-    let noMonsters = [] :: [Monster]
-        noNPCs     = [] :: [NPC]
-        noItems    = [] :: [(Pos, Item)]
-
     it "returns positions up to the wall" $ do
-      let steps = dashSteps tinyLevel noMonsters noNPCs noItems (V2 1 2) E 10
+      let steps = dashSteps (mkDashCtx tinyLevel (V2 1 2)) E 10
       -- from (1,2) going East: (2,2), (3,2) then wall at (4,2)
       steps `shouldBe` [V2 2 2, V2 3 2]
 
     it "returns empty when immediately blocked" $ do
-      let steps = dashSteps tinyLevel noMonsters noNPCs noItems (V2 1 2) W 10
+      let steps = dashSteps (mkDashCtx tinyLevel (V2 1 2)) W 10
       -- from (1,2) going West: wall at (0,2)
       steps `shouldBe` []
 
     it "stops before a monster" $ do
       let rat   = mkMonster Rat (V2 3 2)
-          steps = dashSteps tinyLevel [rat] noNPCs noItems (V2 1 2) E 10
+          ctx   = (mkDashCtx tinyLevel (V2 1 2)) { dcMonsters = [rat] }
+          steps = dashSteps ctx E 10
       steps `shouldBe` [V2 2 2]
 
     it "stops before an item on the floor" $ do
-      let items = [(V2 3 2, IPotion HealingMinor)]
-          steps = dashSteps tinyLevel noMonsters noNPCs items (V2 1 2) E 10
+      let ctx   = (mkDashCtx tinyLevel (V2 1 2))
+                    { dcItems = [(V2 3 2, IPotion HealingMinor)] }
+          steps = dashSteps ctx E 10
       steps `shouldBe` [V2 2 2]
 
     it "respects the step limit" $ do
@@ -85,18 +93,18 @@ spec = do
                 in if y == 0 || y == 2 || x == 0 || x == 6 then Wall else Floor
             , dlRooms = [Room 1 1 5 1]
             }
-          steps = dashSteps wide noMonsters noNPCs noItems (V2 1 1) E 2
+          steps = dashSteps (mkDashCtx wide (V2 1 1)) E 2
       length steps `shouldBe` 2
 
     it "passes through an open door" $ do
       let withOpen = tinyLevel
             { dlTiles = dlTiles tinyLevel V.// [(2 * 5 + 2, Door Open)] }
-          steps = dashSteps withOpen noMonsters noNPCs noItems (V2 1 2) E 10
+          steps = dashSteps (mkDashCtx withOpen (V2 1 2)) E 10
       -- (2,2) is open door, (3,2) is floor, (4,2) is wall
       steps `shouldBe` [V2 2 2, V2 3 2]
 
     it "stops at a closed door" $ do
       let withDoor = tinyLevel
             { dlTiles = dlTiles tinyLevel V.// [(2 * 5 + 2, Door Closed)] }
-          steps = dashSteps withDoor noMonsters noNPCs noItems (V2 1 2) E 10
+          steps = dashSteps (mkDashCtx withDoor (V2 1 2)) E 10
       steps `shouldBe` []

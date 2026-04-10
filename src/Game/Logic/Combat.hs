@@ -1,6 +1,7 @@
 module Game.Logic.Combat
   ( Damage(..)
   , CombatResult(..)
+  , CombatContext(..)
   , HitOutcome(..)
   , resolveWith
   , resolveAttack
@@ -9,7 +10,9 @@ module Game.Logic.Combat
   , resultDamage
   , describeAttack
   , describeAttacked
+  , combatContext
   , applyHitResult
+  , applyHitOutcome
   , monsterCombatEvent
   ) where
 
@@ -18,6 +21,7 @@ import System.Random (StdGen, randomR)
 import Game.Types
   ( Pos, Stats(..), Monster(..), Item, GameEvent(..), isBoss, monsterName, itemName
   )
+import Game.State.Types (GameState(..), emit)
 import Game.Logic.Quest (Quest, QuestEvent(..), fireQuestEvent)
 import qualified Game.Logic.Progression as P
 import qualified Game.Logic.Loot as Loot
@@ -87,9 +91,30 @@ describeAttacked (Hit         (Damage d)) attacker = "The " ++ attacker ++ " hit
 describeAttacked (CriticalHit (Damage d)) attacker = "The " ++ attacker ++ " crits you for " ++ show d ++ "!"
 describeAttacked (Kill        (Damage d)) attacker = "The " ++ attacker ++ " kills you (" ++ show d ++ ")."
 
--- | Result of applying a hit to a monster. Returned by
---   'applyHitResult' so the caller can wire the fields back into
---   'GameState' without Combat needing to import it.
+-- | The subset of game state needed by 'applyHitResult'.
+data CombatContext = CombatContext
+  { ccMonsters     :: ![Monster]
+  , ccPlayerStats  :: !Stats
+  , ccRng          :: !StdGen
+  , ccVictory      :: !Bool
+  , ccFinalTurns   :: !(Maybe Int)
+  , ccTurnsElapsed :: !Int
+  , ccQuests       :: ![Quest]
+  }
+
+-- | Build a 'CombatContext' from the live game state.
+combatContext :: GameState -> CombatContext
+combatContext gs = CombatContext
+  { ccMonsters     = gsMonsters gs
+  , ccPlayerStats  = gsPlayerStats gs
+  , ccRng          = gsRng gs
+  , ccVictory      = gsVictory gs
+  , ccFinalTurns   = gsFinalTurns gs
+  , ccTurnsElapsed = gsTurnsElapsed gs
+  , ccQuests       = gsQuests gs
+  }
+
+-- | Result of applying a hit to a monster.
 data HitOutcome = HitOutcome
   { hoMonsters     :: ![Monster]
   , hoPlayerStats  :: !Stats
@@ -102,24 +127,32 @@ data HitOutcome = HitOutcome
   , hoQuests       :: ![Quest]
   }
 
+-- | Wire a 'HitOutcome' back into the game state.
+applyHitOutcome :: HitOutcome -> GameState -> GameState
+applyHitOutcome ho gs = emit
+  gs { gsMonsters     = hoMonsters ho
+     , gsPlayerStats  = hoPlayerStats ho
+     , gsRng          = hoRng ho
+     , gsMessages     = hoNewMessages ho ++ gsMessages gs
+     , gsItemsOnFloor = gsItemsOnFloor gs ++ hoNewItems ho
+     , gsVictory      = hoVictory ho
+     , gsFinalTurns   = hoFinalTurns ho
+     , gsQuests       = hoQuests ho
+     }
+  (hoEvents ho)
+
 -- | Shared post-resolution pipeline for any player-initiated hit
---   on a monster (melee or ranged). Pure — takes the specific
---   fields it needs and returns a 'HitOutcome'.
-applyHitResult
-  :: Int            -- ^ monster index
-  -> Monster        -- ^ the monster hit
-  -> CombatResult
-  -> [Monster]      -- ^ current monster list
-  -> Stats          -- ^ player stats
-  -> StdGen         -- ^ RNG (already advanced past the attack roll)
-  -> Bool           -- ^ current victory flag
-  -> Maybe Int      -- ^ current final turns
-  -> Int            -- ^ turns elapsed
-  -> [Quest]        -- ^ current quests
-  -> HitOutcome
-applyHitResult i m result monsters playerStats gen
-               victory finalTurns turnsElapsed quests =
-  let newMStats      = applyDamage (mStats m) (Damage (resultDamage result))
+--   on a monster (melee or ranged).
+applyHitResult :: Int -> Monster -> CombatResult -> CombatContext -> HitOutcome
+applyHitResult i m result ctx =
+  let playerStats  = ccPlayerStats ctx
+      monsters     = ccMonsters ctx
+      gen          = ccRng ctx
+      victory      = ccVictory ctx
+      finalTurns   = ccFinalTurns ctx
+      turnsElapsed = ccTurnsElapsed ctx
+      quests       = ccQuests ctx
+      newMStats      = applyDamage (mStats m) (Damage (resultDamage result))
       killed         = isDead newMStats
       wasBoss        = isBoss (mKind m)
       combatEv       = playerCombatEvent result

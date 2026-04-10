@@ -446,8 +446,7 @@ playerDash dir gs
              : gsMessages gs
          }
   | otherwise =
-      let steps  = Door.dashSteps (gsLevel gs) (gsMonsters gs) (gsNPCs gs)
-                      (gsItemsOnFloor gs) (gsPlayerPos gs) dir dashMaxSteps
+      let steps  = M.dashSteps (M.dashContext gs) dir dashMaxSteps
           nTaken = length steps
       in if nTaken == 0
            then gs { gsMessages = "You can't dash that way." : gsMessages gs }
@@ -620,30 +619,14 @@ turnInQuest npcIdx readyIdx gs =
       | n < 0 || n >= length xs = Nothing
       | otherwise               = Just (xs !! n)
 
--- | Wire a 'C.HitOutcome' back into the game state.
-applyHitOutcome :: C.HitOutcome -> GameState -> GameState
-applyHitOutcome ho gs = emit
-  gs { gsMonsters     = C.hoMonsters ho
-     , gsPlayerStats  = C.hoPlayerStats ho
-     , gsRng          = C.hoRng ho
-     , gsMessages     = C.hoNewMessages ho ++ gsMessages gs
-     , gsItemsOnFloor = gsItemsOnFloor gs ++ C.hoNewItems ho
-     , gsVictory      = C.hoVictory ho
-     , gsFinalTurns   = C.hoFinalTurns ho
-     , gsQuests       = C.hoQuests ho
-     }
-  (C.hoEvents ho)
-
 playerAttack :: GameState -> Int -> Monster -> GameState
 playerAttack gs i m =
   let playerCombat   = Inv.effectiveStats (gsPlayerStats gs) (gsInventory gs)
       (result, gen') = C.resolveAttack (gsRng gs) playerCombat (mStats m)
       msg            = C.describeAttack result (monsterName (mKind m))
-      ho             = C.applyHitResult i m result
-                         (gsMonsters gs) (gsPlayerStats gs) gen'
-                         (gsVictory gs) (gsFinalTurns gs) (gsTurnsElapsed gs)
-                         (gsQuests gs)
-  in applyHitOutcome (ho { C.hoNewMessages = C.hoNewMessages ho ++ [msg] }) gs
+      ctx            = (C.combatContext gs) { C.ccRng = gen' }
+      ho             = C.applyHitResult i m result ctx
+  in C.applyHitOutcome (ho { C.hoNewMessages = C.hoNewMessages ho ++ [msg] }) gs
 
 -- | Ranged attack: fire one arrow in the given direction. The
 --   caller in 'applyAction' uses the arrow-count delta to decide
@@ -678,11 +661,9 @@ fireArrow dir gs =
           pushMsg msg (decArrow gs)
         Ranged.ShotLanded i m result msg gen' ->
           let gs' = decArrow gs
-              ho  = C.applyHitResult i m result
-                      (gsMonsters gs') (gsPlayerStats gs') gen'
-                      (gsVictory gs') (gsFinalTurns gs') (gsTurnsElapsed gs')
-                      (gsQuests gs')
-          in applyHitOutcome (ho { C.hoNewMessages = C.hoNewMessages ho ++ [msg] }) gs'
+              ctx = (C.combatContext gs') { C.ccRng = gen' }
+              ho  = C.applyHitResult i m result ctx
+          in C.applyHitOutcome (ho { C.hoNewMessages = C.hoNewMessages ho ++ [msg] }) gs'
   where
     pushMsg m s = s { gsMessages = m : gsMessages s }
     decArrow s  =
@@ -1031,9 +1012,7 @@ tickDash gs = gs { gsDashCooldown = Tick.tickDash (gsDashCooldown gs) }
 
 tickRegen :: GameState -> GameState
 tickRegen gs =
-  let (stats', counter') = Tick.tickRegen
-        (gsDead gs) (gsVictory gs) (gsPlayerStats gs)
-        (gsRegenCounter gs) (gsVisible gs) (gsMonsters gs)
+  let (stats', counter') = Tick.tickRegen (Tick.regenContext gs)
   in gs { gsPlayerStats = stats', gsRegenCounter = counter' }
 
 tickTurnCounter :: GameState -> GameState

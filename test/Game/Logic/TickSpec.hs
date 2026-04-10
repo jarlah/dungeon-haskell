@@ -4,7 +4,7 @@ import Test.Hspec
 import qualified Data.Set as Set
 
 import Game.Types (Stats(..), Monster(..), MonsterKind(..), mkMonster)
-import Game.Logic.Tick (tickDash, tickRegen, tickTurnCounter)
+import Game.Logic.Tick (tickDash, tickRegen, RegenContext(..), tickTurnCounter)
 import Game.Logic.Constants (regenInterval)
 import Linear (V2(..))
 
@@ -12,6 +12,16 @@ baseStats :: Stats
 baseStats = Stats
   { sHP = 20, sMaxHP = 25, sAttack = 6, sDefense = 2
   , sSpeed = 10, sLevel = 1, sXP = 0
+  }
+
+mkRegenCtx :: RegenContext
+mkRegenCtx = RegenContext
+  { rcDead     = False
+  , rcVictory  = False
+  , rcStats    = baseStats
+  , rcCounter  = 0
+  , rcVisible  = Set.empty
+  , rcMonsters = []
   }
 
 spec :: Spec
@@ -27,50 +37,50 @@ spec = do
       tickDash 1 `shouldBe` 0
 
   describe "tickRegen" $ do
-    let noMonsters = [] :: [Monster]
-        emptyVis   = Set.empty
-
     it "is a no-op when dead" $ do
-      let (stats', counter') = tickRegen True False baseStats 5 emptyVis noMonsters
+      let (stats', counter') = tickRegen mkRegenCtx { rcDead = True, rcCounter = 5 }
       stats' `shouldBe` baseStats
       counter' `shouldBe` 5
 
     it "is a no-op when victorious" $ do
-      let (stats', counter') = tickRegen False True baseStats 5 emptyVis noMonsters
+      let (stats', counter') = tickRegen mkRegenCtx { rcVictory = True, rcCounter = 5 }
       stats' `shouldBe` baseStats
       counter' `shouldBe` 5
 
     it "resets counter to 0 at full HP" $ do
       let fullStats = baseStats { sHP = 25 }
-          (stats', counter') = tickRegen False False fullStats 8 emptyVis noMonsters
+          (stats', counter') = tickRegen mkRegenCtx { rcStats = fullStats, rcCounter = 8 }
       stats' `shouldBe` fullStats
       counter' `shouldBe` 0
 
     it "resets counter when a hostile is visible" $ do
       let rat = mkMonster Rat (V2 2 2)
           vis = Set.singleton (V2 2 2)
-          (stats', counter') = tickRegen False False baseStats 10 vis [rat]
+          (stats', counter') = tickRegen mkRegenCtx
+            { rcCounter = 10, rcVisible = vis, rcMonsters = [rat] }
       stats' `shouldBe` baseStats
       counter' `shouldBe` 0
 
     it "increments counter when safe and below full HP" $ do
-      let (_, counter') = tickRegen False False baseStats 0 emptyVis noMonsters
+      let (_, counter') = tickRegen mkRegenCtx
       counter' `shouldBe` 1
 
     it "heals 1 HP and resets counter at regenInterval" $ do
-      let (stats', counter') = tickRegen False False baseStats (regenInterval - 1) emptyVis noMonsters
+      let (stats', counter') = tickRegen mkRegenCtx { rcCounter = regenInterval - 1 }
       sHP stats' `shouldBe` sHP baseStats + 1
       counter' `shouldBe` 0
 
     it "never heals above sMaxHP" $ do
       let almostFull = baseStats { sHP = sMaxHP baseStats - 1 }
-          (stats', _) = tickRegen False False almostFull (regenInterval - 1) emptyVis noMonsters
+          (stats', _) = tickRegen mkRegenCtx
+            { rcStats = almostFull, rcCounter = regenInterval - 1 }
       sHP stats' `shouldBe` sMaxHP baseStats
 
     it "does not tick when monster exists but is not visible" $ do
       let rat = mkMonster Rat (V2 2 2)
           vis = Set.singleton (V2 4 4)  -- monster not in visible set
-          (_, counter') = tickRegen False False baseStats 5 vis [rat]
+          (_, counter') = tickRegen mkRegenCtx
+            { rcCounter = 5, rcVisible = vis, rcMonsters = [rat] }
       counter' `shouldBe` 6
 
   describe "tickTurnCounter" $ do
