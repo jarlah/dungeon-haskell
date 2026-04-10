@@ -65,6 +65,7 @@ library
     Game.Input
     Game.Audio
     Game.Save.Types
+    Game.Save.Binary
     Game.Save
     Game.Config
     Game.AI.Types

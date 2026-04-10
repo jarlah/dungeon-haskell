@@ -1,21 +1,8 @@
-{-# LANGUAGE DeriveGeneric       #-}
-{-# LANGUAGE StandaloneDeriving  #-}
-{-# LANGUAGE FlexibleInstances   #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# OPTIONS_GHC -Wno-orphans #-}
--- ^ Game.Save is deliberately the single home for every Binary
--- instance in the project. Centralizing them here keeps Game.Types
--- / Game.Core / Game.Logic.* free of serialization concerns,
--- at the cost of every instance being technically orphan. That's
--- an intentional tradeoff, so the warning is suppressed module-wide.
 -- | Save-game persistence layer for 'GameState'.
 --
---   This module is the single source of truth for how the game is
---   serialized to disk. It provides:
+--   This module provides:
 --
---   * orphan 'Generic' / 'Binary' instances for every type reachable
---     from 'GameState' (centralized here so 'Game.Types' and friends
---     stay free of serialization concerns);
 --   * a pure encode/decode layer built on 'Data.Binary' with a small
 --     magic-header + version prefix so we can reject old or corrupted
 --     files cleanly instead of silently decoding nonsense;
@@ -25,32 +12,9 @@
 --     layer can report errors without caring about which library blew
 --     up underneath it.
 --
---   Design notes:
---
---   * **Binary, not text.** Save files are deliberately opaque so
---     casual "just bump my HP to 999" edits don't work. Anyone with
---     @ghci@ and this module can still decode a save, but that's a
---     much higher bar than opening it in a text editor.
---
---   * **Magic header.** Every save begins with the 8-byte ASCII
---     sequence @DHSAVE\<vv\>@ (Dungeon Haskell SAVE, format version
---     \<vv\>). The current version is @DHSAVE03@. The version trails
---     the magic so that bumping the save format across a schema
---     change is a single-byte patch and old saves get rejected
---     cleanly with 'SaveWrongVersion' instead of silently decoding
---     into garbage. There is no migration path — hobby-project
---     tradeoff.
---
---   * **Atomic writes.** 'writeSave' encodes to a @\<slot\>.save.tmp@
---     tempfile, @hFlush@es, then 'renameFile's over the target. A
---     crash mid-write can corrupt the tempfile but never an existing
---     save.
---
---   * **Graceful degradation.** Every IO boundary is wrapped in @try@
---     and funneled into 'SaveError'. The save system, like the audio
---     system, must never crash the game on a missing file or a
---     permission error — it reports the failure upstream and lets the
---     game keep running.
+--   Orphan 'Generic' / 'Binary' instances for every type reachable
+--   from 'GameState' live in "Game.Save.Binary" and are imported
+--   here for their side-effects.
 module Game.Save
   ( -- * Re-exports from "Game.Save.Types"
     SaveSlot(..)
@@ -79,13 +43,11 @@ import           Control.Monad.Trans.Except (ExceptT (..), runExceptT, throwE)
 import           Control.Monad.IO.Class     (liftIO)
 import qualified Data.ByteString.Lazy       as BL
 import qualified Data.ByteString.Lazy.Char8 as BL8
-import           Data.Binary                (Binary (..), decodeOrFail, encode)
+import           Data.Binary                (decodeOrFail, encode)
 import           Data.List                  (sortOn, isSuffixOf, stripPrefix)
 import           Data.Maybe                 (catMaybes)
 import           Data.Ord                   (Down (..))
 import           Data.Time.Clock            (UTCTime)
-import           Data.Vector.Binary         ()
-import           GHC.Generics               (Generic)
 import           System.Directory
   ( createDirectoryIfMissing
   , doesDirectoryExist
@@ -100,120 +62,9 @@ import           System.Directory
 import           System.FilePath            ((</>), (<.>), takeFileName)
 
 import           Game.Core
-import           Game.Logic.Chest           (Chest (..), ChestState (..))
-import           Game.Logic.Quest
+import           Game.Save.Binary           ()
 import           Game.Save.Types
 import           Game.Types
-import           System.Random.Internal     (StdGen (..))
-import           System.Random.SplitMix     (seedSMGen, unseedSMGen)
-
---------------------------------------------------------------------
--- Orphan instances
---------------------------------------------------------------------
-
--- Binary for V2 a is already provided by 'linear' (conditionally
--- behind its Binary instances), so we don't add our own and risk
--- an overlap. Vector/Map/Set come from binary + vector-binary-
--- instances. The only type reachable from 'GameState' that still
--- needs a hand-rolled instance is 'StdGen'.
-
--- Binary for StdGen: 'random' 1.2+ models 'StdGen' as an opaque
--- newtype around a splitmix 'SMGen', with no 'Read' instance, so
--- a naive Show/Read round-trip doesn't compile. Instead we reach
--- into 'System.Random.Internal' for the newtype constructor and
--- serialize the underlying splitmix state as two 'Word64's via
--- 'unseedSMGen' / 'seedSMGen'. This is 16 bytes, deterministic,
--- and preserves the exact RNG stream so a save/load round-trip
--- is bit-identical with a run that never saved.
-instance Binary StdGen where
-  put (StdGen smg) =
-    let (a, b) = unseedSMGen smg
-    in put a >> put b
-  get = do
-    a <- get
-    StdGen . seedSMGen a <$> get
-
---------------------------------------------------------------------
--- Generic + Binary for every game type reachable from GameState.
---
--- StandaloneDeriving lets us keep Game.Types / Game.Core /
--- Game.Logic.Quest / Game.Logic.Dungeon completely free of
--- serialization concerns — every type is stock-derivable because
--- its constructors are exported. Orphan warnings are not enabled
--- in the cabal file so this deliberate centralization is silent.
---------------------------------------------------------------------
-
-deriving instance Generic Dir
-deriving instance Generic KeyId
-deriving instance Generic DoorState
-deriving instance Generic Tile
-deriving instance Generic DungeonLevel
-deriving instance Generic Stats
-deriving instance Generic MonsterKind
-deriving instance Generic Monster
-deriving instance Generic GameEvent
-deriving instance Generic Potion
-deriving instance Generic Weapon
-deriving instance Generic Armor
-deriving instance Generic Item
-deriving instance Generic Inventory
-deriving instance Generic InventoryError
-deriving instance Generic GameAction
-
-deriving instance Generic Room
-
-deriving instance Generic QuestGoal
-deriving instance Generic QuestStatus
-deriving instance Generic QuestEvent
-deriving instance Generic Quest
-
-deriving instance Generic NPC
-deriving instance Generic ChestState
-deriving instance Generic Chest
-deriving instance Generic ParkedLevel
-deriving instance Generic SaveMenu
-deriving instance Generic SaveMenuMode
-deriving instance Generic SaveMenuEntry
-deriving instance Generic LaunchMenu
-deriving instance Generic LaunchOption
-deriving instance Generic DirectionalAction
-deriving instance Generic GameState
-
-instance Binary Dir
-instance Binary KeyId
-instance Binary DoorState
-instance Binary Tile
-instance Binary DungeonLevel
-instance Binary Stats
-instance Binary MonsterKind
-instance Binary Monster
-instance Binary GameEvent
-instance Binary Potion
-instance Binary Weapon
-instance Binary Armor
-instance Binary Item
-instance Binary Inventory
-instance Binary InventoryError
-instance Binary GameAction
-
-instance Binary Room
-
-instance Binary QuestGoal
-instance Binary QuestStatus
-instance Binary QuestEvent
-instance Binary Quest
-
-instance Binary NPC
-instance Binary ChestState
-instance Binary Chest
-instance Binary ParkedLevel
-instance Binary SaveMenu
-instance Binary SaveMenuMode
-instance Binary SaveMenuEntry
-instance Binary LaunchMenu
-instance Binary LaunchOption
-instance Binary DirectionalAction
-instance Binary GameState
 
 --------------------------------------------------------------------
 -- Pure encode / decode
