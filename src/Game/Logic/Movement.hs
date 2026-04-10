@@ -49,7 +49,7 @@ dashContext gs = DashContext
 --   list = blocked at step 1).
 dashSteps :: DashContext -> Dir -> Int -> [Pos]
 dashSteps dc dir n =
-  let dl       = dcLevel dc
+  let level    = dcLevel dc
       monsters = dcMonsters dc
       npcs     = dcNPCs dc
       items    = dcItems dc
@@ -63,7 +63,7 @@ dashSteps dc dir n =
              else next : go (k - 1) next
 
       dashPassable p =
-        case tileAt dl p of
+        case tileAt level p of
           Just Floor       -> clearOfActors p
           Just (Door Open) -> clearOfActors p
           _                -> False
