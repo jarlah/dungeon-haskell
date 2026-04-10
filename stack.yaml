@@ -28,6 +28,7 @@ nix:
   enable: true
   packages:
     - haskell.compiler.ghc9103
+    - haskell.packages.ghc9103.haskell-language-server
     - git
     - gcc
     - gmp
