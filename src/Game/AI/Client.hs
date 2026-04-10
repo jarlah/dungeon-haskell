@@ -29,6 +29,8 @@ import qualified Data.Text                as T
 import           Data.Text                (Text)
 import qualified Data.Text.Encoding       as TE
 import qualified Data.Vector              as V
+import           System.Directory         (doesFileExist)
+import           System.Environment       (lookupEnv)
 
 import qualified Network.HTTP.Client      as HTTP
 import qualified Network.HTTP.Tower       as Tower
@@ -73,7 +75,8 @@ newAIClient cfg
   | not (aiEnabled cfg)             = pure DisabledClient
   | aiProvider cfg == ProviderMock  = pure MockClient
   | otherwise = do
-      base <- Tower.newClient
+      caPath <- findCACert
+      base <- Tower.newClientWithTLS caPath Nothing
       let retries = max 0 (aiMaxRetries cfg)
           timeoutMs = max 1 (aiTimeoutSeconds cfg) * 1000
           stack =
@@ -231,3 +234,26 @@ fromServiceError err = case err of
   Tower.RetryExhausted _ e -> AIRetryExhausted (Tower.displayError e)
   Tower.CircuitBreakerOpen -> AICircuitOpen
   Tower.CustomError t      -> AINetworkError t
+
+-- | Find a CA certificate bundle. Checks SSL_CERT_FILE first, then
+--   probes well-known system paths. Returns 'Nothing' to fall back
+--   to the compiled-in default (which may not work under Nix).
+findCACert :: IO (Maybe FilePath)
+findCACert = do
+  envPath <- lookupEnv "SSL_CERT_FILE"
+  case envPath of
+    Just p  -> do
+      ok <- doesFileExist p
+      if ok then pure (Just p) else probe
+    Nothing -> probe
+  where
+    probe = firstExisting
+      [ "/etc/ssl/certs/ca-certificates.crt"
+      , "/etc/ssl/certs/ca-bundle.crt"
+      , "/etc/pki/tls/certs/ca-bundle.crt"
+      , "/etc/ssl/ca-bundle.pem"
+      ]
+    firstExisting []     = pure Nothing
+    firstExisting (p:ps) = do
+      ok <- doesFileExist p
+      if ok then pure (Just p) else firstExisting ps

@@ -39,6 +39,7 @@ pkgs.mkShell {
   # GHC we provide here instead of spawning a second shell.
   shellHook = ''
     export LANG=en_US.UTF-8
+    export SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt
     lefthook install
   '';
 }
