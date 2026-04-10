@@ -9,3 +9,5 @@ dist-newstyle/
 *.o
 *.swp
 .ghc.environment.*
+config.yaml
+ai.log

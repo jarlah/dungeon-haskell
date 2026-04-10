@@ -51,8 +51,9 @@ import qualified Data.Text                as T
 import           Data.Text                (Text)
 
 import           Game.AI.Client           (AIClient, sendPrompt)
+import           Game.AI.Log              (AILog, logAI)
 import           Game.AI.Types            (AIError (..), AIRequest (..),
-                                           AIResponse (..))
+                                           AIResponse (..), displayAIError)
 import           Game.Config              (AIConfig)
 
 -- | Handle to a running AI worker. Opaque to callers — the only
@@ -73,11 +74,12 @@ data AIWorker = AIWorker
 startAIWorker
   :: AIClient
   -> AIConfig
+  -> AILog
   -> (AIResponse -> IO ())   -- ^ emit a response back to the game layer
   -> IO AIWorker
-startAIWorker client cfg emit = do
+startAIWorker client cfg alog emit = do
   q <- newTQueueIO
-  tid <- async (workerLoop client cfg q emit)
+  tid <- async (workerLoop client cfg alog q emit)
   pure AIWorker { workerQueue = q, workerThread = tid }
 
 -- | Stop the worker and wait for it to exit. Safe to call more
@@ -112,24 +114,31 @@ requestAI w req = atomically (writeTQueue (workerQueue w) req)
 workerLoop
   :: AIClient
   -> AIConfig
+  -> AILog
   -> TQueue AIRequest
   -> (AIResponse -> IO ())
   -> IO ()
-workerLoop client cfg q emit = forever $ do
+workerLoop client cfg alog q emit = forever $ do
   req <- atomically (readTQueue q)
-  resp <- processRequest client cfg req
+  resp <- processRequest client cfg alog req
   emit resp
 
 -- | Run a single request through the client and wrap the result.
 --   Catches synchronous exceptions so the worker loop can't die
 --   on a badly-configured endpoint or a surprise runtime error.
-processRequest :: AIClient -> AIConfig -> AIRequest -> IO AIResponse
-processRequest client cfg req = do
-  let (wrap, prompt) = case req of
-        ReqGreeting  tok p -> (RespGreeting  tok, p)
-        ReqQuest     tok p -> (RespQuest     tok, p)
-        ReqRoomDesc  tok p -> (RespRoomDesc  tok, p)
+processRequest :: AIClient -> AIConfig -> AILog -> AIRequest -> IO AIResponse
+processRequest client cfg alog req = do
+  let (wrap, prompt, label) = case req of
+        ReqGreeting  tok p -> (RespGreeting  tok, p, "greeting")
+        ReqQuest     tok p -> (RespQuest     tok, p, "quest")
+        ReqRoomDesc  tok p -> (RespRoomDesc  tok, p, "room-desc")
+  logAI alog $ "REQ [" ++ label ++ "] " ++ T.unpack (T.take 120 prompt) ++ "..."
   result <- safeSend client cfg prompt
+  case result of
+    Right txt -> logAI alog $ "OK  [" ++ label ++ "] "
+                  ++ T.unpack (T.take 200 txt)
+    Left err  -> logAI alog $ "ERR [" ++ label ++ "] "
+                  ++ T.unpack (displayAIError err)
   pure (wrap result)
 
 -- | 'sendPrompt' with a catch-all wrapper. Synchronous exceptions

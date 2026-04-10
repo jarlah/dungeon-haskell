@@ -75,6 +75,7 @@ library
     Game.AI.NPCBehaviour
     Game.AI.LevelContent
     Game.AI.Mock
+    Game.AI.Log
     Game.AI.Async
     Game.AI.Runtime
   build-depends:

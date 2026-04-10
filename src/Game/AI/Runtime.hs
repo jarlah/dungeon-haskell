@@ -45,9 +45,10 @@ import Linear (V2 (..))
 
 import qualified Game.AI.Async as AIAsync
 import qualified Game.AI.Client as AIClient
+import           Game.AI.Log (AILog, openAILog, closeAILog, logAI)
 import qualified Game.AI.Prompts as AIPrompts
 import qualified Game.AI.QuestGen as AIQuestGen
-import Game.AI.Types (AIRequest (..), AIResponse (..))
+import Game.AI.Types (AIRequest (..), AIResponse (..), displayAIError)
 import Game.Config (AIConfig (..), GameConfig (..))
 import Game.Core
 import Game.Logic.Quest (Quest (..), qName)
@@ -75,6 +76,7 @@ data AIRuntime = AIRuntime
   { aiCfg        :: !AIConfig
   , aiClient     :: !AIClient.AIClient
   , aiWorker     :: !AIAsync.AIWorker
+  , aiLog        :: !AILog
   , aiPending    :: !(IORef [(Int, Int)])
     -- ^ NPC slots (depth, npcIndex) with a greeting request currently
     --   in flight. Kept as a plain list — we only ever have a handful
@@ -129,18 +131,23 @@ newtype AppEvent
 startAIRuntime :: GameConfig -> BChan.BChan AppEvent -> IO AIRuntime
 startAIRuntime gc chan = do
   let cfg = gcAI gc
+  alog      <- openAILog
+  logAI alog $ "AI runtime starting — enabled=" ++ show (aiEnabled cfg)
+                ++ " provider=" ++ show (aiProvider cfg)
+                ++ " model=" ++ T.unpack (aiModel cfg)
   client    <- AIClient.newAIClient cfg
   pending   <- newIORef []
   tokRef    <- newIORef 0
   mapRef    <- newIORef []
   seenFloor <- newIORef Set.empty
   seenRoom  <- newIORef Set.empty
-  worker    <- AIAsync.startAIWorker client cfg $ \resp ->
+  worker    <- AIAsync.startAIWorker client cfg alog $ \resp ->
     BChan.writeBChan chan (AIResult resp)
   pure AIRuntime
     { aiCfg        = cfg
     , aiClient     = client
     , aiWorker     = worker
+    , aiLog        = alog
     , aiPending    = pending
     , aiNextToken  = tokRef
     , aiTokenMap   = mapRef
@@ -152,8 +159,10 @@ startAIRuntime gc chan = do
 --   cleanup even if startup partially failed.
 stopAIRuntime :: AIRuntime -> IO ()
 stopAIRuntime rt = do
+  logAI (aiLog rt) "AI runtime stopping"
   AIAsync.stopAIWorker (aiWorker rt)
   AIClient.closeAIClient (aiClient rt)
+  closeAILog (aiLog rt)
 
 --------------------------------------------------------------------
 -- Request firing — called after every keystroke
@@ -310,7 +319,9 @@ applyAIResponse rt resp = case resp of
         -- itself onto whoever is now at that index.
         when (dlDepth (gsLevel gs) == depth) $
           modify (updateNPCGreet npcIdx (T.unpack greetTxt))
-  RespGreeting tok (Left _) -> do
+  RespGreeting tok (Left err) -> do
+    liftIO $ logAI (aiLog rt) $ "greeting response failed: "
+              ++ T.unpack (displayAIError err)
     -- Failure: clear the bookkeeping so a retry is possible next
     -- time the player re-enters the dialogue. The greeting field
     -- stays 'Nothing', so the fallback line keeps showing.
@@ -340,7 +351,9 @@ applyAIResponse rt resp = case resp of
               ("The Quest Master calls on you: \"" ++ qName q ++ "\".")
               : gsMessages gs
           }
-  RespQuest{}    -> pure ()  -- Left (AIError): fall back silently
+  RespQuest _ (Left err) ->
+    liftIO $ logAI (aiLog rt) $ "quest response failed: "
+              ++ T.unpack (displayAIError err)
   RespRoomDesc tok (Right descTxt) -> do
     -- Pop the slot this token was fired for, if any. A missing
     -- token is silently dropped — likely a load/reset cleared the
@@ -364,7 +377,9 @@ applyAIResponse rt resp = case resp of
             { gsRoomDesc        = Just (T.unpack descTxt)
             , gsRoomDescVisible = True
             }
-  RespRoomDesc tok (Left _) ->
+  RespRoomDesc tok (Left err) -> do
+    liftIO $ logAI (aiLog rt) $ "room-desc response failed: "
+              ++ T.unpack (displayAIError err)
     -- Failure: just drain the token map so the slot counter doesn't
     -- leak. The description stays 'Nothing' and the panel never
     -- appears; the player sees no difference from AI being disabled.
