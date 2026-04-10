@@ -167,7 +167,11 @@ instance FromJSON AudioConfig where
   parseJSON = withObject "AudioConfig" $ \o -> do
     music <- o .:? "music_volume" .!= acMusicVolume defaultAudioConfig
     sfx   <- o .:? "sfx_volume"   .!= acSfxVolume   defaultAudioConfig
-    pure AudioConfig { acMusicVolume = music, acSfxVolume = sfx }
+    pure AudioConfig { acMusicVolume = clamp01 music, acSfxVolume = clamp01 sfx }
+
+-- | Clamp a volume value to the 0.0–1.0 range.
+clamp01 :: Double -> Double
+clamp01 = max 0.0 . min 1.0
 
 instance FromJSON AIProvider where
   parseJSON = withText "AIProvider" $ \t -> case T.toLower t of

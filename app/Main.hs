@@ -176,7 +176,7 @@ main = do
 
   -- Audio init is best-effort: if it fails (no device, missing
   -- assets, ...), 'bracket' still runs the game silently.
-  bracket Audio.initAudio
+  bracket (Audio.initAudio (Config.gcAudio gameCfg))
           (mapM_ Audio.shutdownAudio)
           $ \mAudio ->
     bracket (startAIRuntime gameCfg aiChan)

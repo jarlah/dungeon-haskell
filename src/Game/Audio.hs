@@ -20,6 +20,7 @@ import Control.Monad (forM_, when)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
 import qualified Sound.ProteaAudio.SDL as PA
 
+import Game.Config (AudioConfig(..))
 import Game.Types (GameEvent(..))
 
 -- | Which music loop is currently playing. The audio shell keeps a
@@ -84,18 +85,22 @@ fadeSteps = 40
 -- | Initialise the audio backend, load every sample, and start the
 --   background music loop. Returns 'Nothing' if *anything* goes wrong
 --   — the caller should fall back to silent gameplay in that case.
-initAudio :: IO (Maybe AudioSystem)
-initAudio = do
+--   The 'AudioConfig' supplies global music and SFX volume multipliers
+--   applied on top of each asset's baked-in relative volume.
+initAudio :: AudioConfig -> IO (Maybe AudioSystem)
+initAudio cfg = do
   ok <- PA.initAudio 32 44100 1024
   if not ok
     then pure Nothing
     else do
+      let musicVol = realToFrac (acMusicVolume cfg)
+          sfxVol   = realToFrac (acSfxVolume cfg)
       result <- (try $ do
         -- Music first: dungeon theme is required, boss theme is
         -- optional and falls back to the dungeon sample if missing
         -- so the swap code still exercises cleanly.
-        dungeonMusic <- PA.sampleFromFile "assets/music/theme.ogg" 0.35
-        bossMusic    <- loadOrFallback "assets/music/boss.ogg" 0.35 dungeonMusic
+        dungeonMusic <- PA.sampleFromFile "assets/music/theme.ogg" (0.35 * musicVol)
+        bossMusic    <- loadOrFallback "assets/music/boss.ogg" (0.35 * musicVol) dungeonMusic
         musicSound   <- PA.soundLoop dungeonMusic 1.0 1.0 0.0 1.0
         musicRef     <- newIORef MusicState
           { msCurrTrack  = DungeonMusic
@@ -105,13 +110,13 @@ initAudio = do
           , msFadeGen    = 0
           }
         -- SFX.
-        miss    <- PA.sampleFromFile "assets/sfx/miss.ogg"    0.7
-        hit     <- PA.sampleFromFile "assets/sfx/hit.ogg"     0.8
-        crit    <- PA.sampleFromFile "assets/sfx/crit.ogg"    1.0
-        kill    <- PA.sampleFromFile "assets/sfx/kill.ogg"    0.9
-        hurt    <- PA.sampleFromFile "assets/sfx/hurt.ogg"    0.85
-        died    <- PA.sampleFromFile "assets/sfx/died.ogg"    1.0
-        levelUp <- PA.sampleFromFile "assets/sfx/levelup.ogg" 0.9
+        miss    <- PA.sampleFromFile "assets/sfx/miss.ogg"    (0.7  * sfxVol)
+        hit     <- PA.sampleFromFile "assets/sfx/hit.ogg"     (0.8  * sfxVol)
+        crit    <- PA.sampleFromFile "assets/sfx/crit.ogg"    (1.0  * sfxVol)
+        kill    <- PA.sampleFromFile "assets/sfx/kill.ogg"    (0.9  * sfxVol)
+        hurt    <- PA.sampleFromFile "assets/sfx/hurt.ogg"    (0.85 * sfxVol)
+        died    <- PA.sampleFromFile "assets/sfx/died.ogg"    (1.0  * sfxVol)
+        levelUp <- PA.sampleFromFile "assets/sfx/levelup.ogg" (0.9  * sfxVol)
         pure AudioSystem
           { asMiss         = miss
           , asHit          = hit
