@@ -46,13 +46,15 @@ spec = describe "Game.Config" $ do
           gcAudio cfg `shouldBe` defaultAudioConfig
         Left err -> expectationFailure (show err)
 
-    it "parses all three provider strings case-insensitively" $ do
+    it "parses all provider strings case-insensitively" $ do
       let parseProvider s = case Yaml.decodeEither' (BS.pack ("ai:\n  provider: " <> s)) :: Either Yaml.ParseException GameConfig of
             Right c -> Right (aiProvider (gcAI c))
             Left e  -> Left (show e)
-      parseProvider "mock"    `shouldBe` Right ProviderMock
-      parseProvider "Ollama"  `shouldBe` Right ProviderOllama
-      parseProvider "OPENAI"  `shouldBe` Right ProviderOpenAI
+      parseProvider "mock"      `shouldBe` Right ProviderMock
+      parseProvider "Ollama"    `shouldBe` Right ProviderOllama
+      parseProvider "OPENAI"    `shouldBe` Right ProviderOpenAI
+      parseProvider "anthropic" `shouldBe` Right ProviderAnthropic
+      parseProvider "ANTHROPIC" `shouldBe` Right ProviderAnthropic
 
     it "rejects an unknown provider with a helpful error" $ do
       let yaml = "ai:\n  provider: gpt5omega\n"

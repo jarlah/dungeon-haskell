@@ -56,10 +56,13 @@ data GameConfig = GameConfig
 --   * 'ProviderOpenAI' — POST to an OpenAI-compatible
 --     @\/v1\/chat\/completions@ endpoint. Same shape covers proxies,
 --     LM Studio, and other compatible backends.
+--   * 'ProviderAnthropic' — POST to the Anthropic Messages API at
+--     @\/v1\/messages@. Uses @x-api-key@ + @anthropic-version@ headers.
 data AIProvider
   = ProviderMock
   | ProviderOllama
   | ProviderOpenAI
+  | ProviderAnthropic
   deriving (Eq, Show)
 
 -- | AI subsystem config. Mirrors the YAML layout documented in
@@ -177,8 +180,9 @@ instance FromJSON AIProvider where
   parseJSON = withText "AIProvider" $ \t -> case T.toLower t of
     "mock"   -> pure ProviderMock
     "ollama" -> pure ProviderOllama
-    "openai" -> pure ProviderOpenAI
-    other    -> fail $ "Unknown AI provider: " <> T.unpack other
+    "openai"    -> pure ProviderOpenAI
+    "anthropic" -> pure ProviderAnthropic
+    other       -> fail $ "Unknown AI provider: " <> T.unpack other
 
 --------------------------------------------------------------------
 -- Loading

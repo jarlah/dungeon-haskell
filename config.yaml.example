@@ -20,10 +20,12 @@ ai:
   enabled: false
 
   # Which backend to speak to. One of:
-  #   mock   — in-process canned responses (no network, deterministic)
-  #   ollama — a local Ollama /api/generate endpoint
-  #   openai — an OpenAI-compatible /v1/chat/completions endpoint
-  #            (works with LM Studio, proxies, etc.)
+  #   mock      — in-process canned responses (no network, deterministic)
+  #   ollama    — a local Ollama /api/generate endpoint
+  #   openai    — an OpenAI-compatible /v1/chat/completions endpoint
+  #               (works with LM Studio, proxies, etc.)
+  #   anthropic — the Anthropic Messages API /v1/messages endpoint
+  #               (uses x-api-key auth, works with Claude models)
   provider: mock
 
   # Full URL for the provider. Ignored by the mock backend.

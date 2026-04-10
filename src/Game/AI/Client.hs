@@ -130,13 +130,21 @@ buildRequest :: AIConfig -> Text -> IO HTTP.Request
 buildRequest cfg prompt = do
   base <- HTTP.parseRequest (T.unpack (aiEndpoint cfg))
   let bodyBytes = A.encode (providerBody (aiProvider cfg) (aiModel cfg) prompt)
-      authHeaders
-        | T.null (aiApiKey cfg) = []
-        | otherwise =
-            [ ( "Authorization"
-              , TE.encodeUtf8 ("Bearer " <> aiApiKey cfg)
-              )
-            ]
+      authHeaders = case aiProvider cfg of
+        ProviderAnthropic
+          | not (T.null (aiApiKey cfg)) ->
+              [ ("x-api-key",         TE.encodeUtf8 (aiApiKey cfg))
+              , ("anthropic-version", "2023-06-01")
+              ]
+          | otherwise ->
+              [ ("anthropic-version", "2023-06-01") ]
+        _
+          | T.null (aiApiKey cfg) -> []
+          | otherwise ->
+              [ ( "Authorization"
+                , TE.encodeUtf8 ("Bearer " <> aiApiKey cfg)
+                )
+              ]
   pure base
     { HTTP.method         = "POST"
     , HTTP.requestHeaders =
@@ -163,6 +171,12 @@ providerBody ProviderOpenAI model prompt = A.object
   , "messages" .= A.toJSON
       [ A.object [ "role" .= ("user" :: Text), "content" .= prompt ] ]
   ]
+providerBody ProviderAnthropic model prompt = A.object
+  [ "model"      .= model
+  , "max_tokens" .= (1024 :: Int)
+  , "messages"   .= A.toJSON
+      [ A.object [ "role" .= ("user" :: Text), "content" .= prompt ] ]
+  ]
 
 -- | Extract the reply text from a provider response body. Ollama
 --   puts the generated text in @response@, OpenAI nests it under
@@ -187,6 +201,15 @@ extractReply cfg body = case aiProvider cfg of
         , Just (A.String t)   <- lookupKey "content" msg
           -> Right t
       _ -> Left (AIParseError "unexpected OpenAI response shape")
+  ProviderAnthropic -> case A.eitherDecode body of
+    Left err -> Left (AIParseError (T.pack err))
+    Right v  -> case v of
+      A.Object o
+        | Just (A.Array content) <- lookupKey "content" o
+        , Just (A.Object block)  <- content V.!? 0
+        , Just (A.String t)      <- lookupKey "text" block
+          -> Right t
+      _ -> Left (AIParseError "unexpected Anthropic response shape")
 
 -- | Look up a 'Text' key in an aeson 2 'A.Object' (which is a
 --   'KeyMap'). Split out so the call sites stay readable.
