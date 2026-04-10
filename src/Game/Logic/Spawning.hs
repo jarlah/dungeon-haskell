@@ -11,7 +11,6 @@ module Game.Logic.Spawning
   , acceptOffer
   ) where
 
-import Data.List (foldl')
 import Linear (V2(..))
 import System.Random (StdGen, randomR)
 

@@ -15,8 +15,8 @@ import Data.Set (Set)
 import Linear (V2(..))
 
 import Game.Types
-  ( Pos, Dir, DungeonLevel(..), Monster(..), MonsterKind, Stats(..)
-  , GameEvent(..), Tile, mkMonster, monsterName, isWalkable, tileAt, dirToOffset
+  ( Pos, DungeonLevel(..), Monster(..), MonsterKind, Stats(..)
+  , GameEvent(..), mkMonster, isWalkable, tileAt, dirToOffset
   )
 import qualified Game.Logic.Progression as P
 

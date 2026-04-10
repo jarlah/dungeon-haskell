@@ -38,7 +38,6 @@ module Game.Core
 
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
-import Data.Set (Set)
 import qualified Data.Vector as V
 import Linear (V2(..))
 import System.Random (StdGen, mkStdGen, randomR)
@@ -57,8 +56,8 @@ import qualified Game.Logic.Movement as M
 import qualified Game.Logic.Progression as P
 import Game.Logic.MonsterAI (MonsterIntent(..), monsterIntent)
 import Game.Logic.Quest
-  ( Quest(..), QuestEvent(..), QuestGoal(..), QuestStatus(..)
-  , mkQuest, fireQuestEvent
+  ( Quest(..), QuestEvent(..), QuestStatus(..)
+  , fireQuestEvent
   )
 import Data.Maybe (isJust)
 import Game.State.Types
@@ -75,10 +74,10 @@ import Game.Logic.Lookup
   ( monsterAt, npcAt, chestAt, replaceChestAt, findKeyIndex, takeFirstItemAt
   )
 import Game.Logic.Spawning
-  ( spawnMonsters, spawnNPCs, randomRoomPos, mkOffer, acceptOffer
+  ( spawnMonsters, spawnNPCs, acceptOffer
   )
 import Game.Logic.Placement
-  ( spawnSideReachable, placeKeyLoot, placeChests, roomPositions, pickBossTopLeft
+  ( spawnSideReachable, placeKeyLoot, placeChests, pickBossTopLeft
   )
 import qualified Game.Logic.Door as Door
 import qualified Game.Logic.Wizard as Wiz
