@@ -5,8 +5,13 @@ import           Test.Hspec
 
 import qualified Data.Text        as T
 
-import           Game.AI.QuestGen (parseQuestJSON)
+import           Game.AI.Client   (newAIClient, closeAIClient)
+import           Game.AI.QuestGen (generateQuest, parseQuestJSON)
+import           Game.Config      (AIConfig(..), AIProvider(..), defaultAIConfig)
 import           Game.Logic.Quest (Quest (..), QuestGoal (..), QuestStatus (..))
+
+mockCfg :: AIConfig
+mockCfg = defaultAIConfig { aiEnabled = True, aiProvider = ProviderMock }
 
 spec :: Spec
 spec = describe "Game.AI.QuestGen.parseQuestJSON" $ do
@@ -92,3 +97,22 @@ spec = describe "Game.AI.QuestGen.parseQuestJSON" $ do
     case parseQuestJSON raw of
       Right q -> qName q `shouldBe` "Unnamed Quest"
       Left e  -> expectationFailure e
+
+  describe "generateQuest (mock integration)" $ do
+    it "returns a valid quest via mock provider" $ do
+      client <- newAIClient mockCfg
+      result <- generateQuest client mockCfg 1 1 0
+      closeAIClient client
+      case result of
+        Just q -> do
+          qName q `shouldSatisfy` (not . null)
+          qStatus q `shouldBe` QuestNotStarted
+          qReward q `shouldSatisfy` (> 0)
+        Nothing -> expectationFailure "expected a quest from mock"
+
+    it "returns Nothing when AI is disabled" $ do
+      let cfg = defaultAIConfig { aiEnabled = False }
+      client <- newAIClient cfg
+      result <- generateQuest client cfg 1 1 0
+      closeAIClient client
+      result `shouldBe` Nothing

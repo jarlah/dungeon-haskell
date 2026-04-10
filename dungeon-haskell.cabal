@@ -136,6 +136,14 @@ test-suite dungeon-haskell-test
     Game.Logic.RangedSpec
     Game.Logic.QuestSpec
     Game.Logic.MonsterAISpec
+    Game.Logic.ConstantsSpec
+    Game.Logic.LookupSpec
+    Game.Logic.SpawningSpec
+    Game.Logic.PlacementSpec
+    Game.Logic.DoorSpec
+    Game.Logic.WizardSpec
+    Game.Logic.TickSpec
+    Game.Logic.ScoringSpec
     Game.CoreSpec
     Game.SaveSpec
     Game.UI.TypesSpec
@@ -148,6 +156,8 @@ test-suite dungeon-haskell-test
     Game.AI.QuestGenSpec
     Game.AI.MockSpec
     Game.AI.RuntimeSpec
+    Game.AI.NPCBehaviourSpec
+    Game.AI.LevelContentSpec
   build-depends:
     , dungeon-haskell
     , hspec
