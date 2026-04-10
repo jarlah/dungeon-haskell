@@ -15,10 +15,12 @@ updateAt i f xs
   | otherwise = take i xs ++ [f (xs !! i)] ++ drop (i + 1) xs
 
 -- | Safe list indexing — returns 'Nothing' for out-of-bounds indices.
+--   Single traversal: O(n) instead of O(2n).
 safeIndex :: Int -> [a] -> Maybe a
-safeIndex n xs
-  | n < 0 || n >= length xs = Nothing
-  | otherwise               = Just (xs !! n)
+safeIndex n _ | n < 0 = Nothing
+safeIndex 0 (x:_)     = Just x
+safeIndex n (_:xs)     = safeIndex (n-1) xs
+safeIndex _ []         = Nothing
 
 removeAt :: Int -> [a] -> [a]
 removeAt i xs = take i xs ++ drop (i + 1) xs
