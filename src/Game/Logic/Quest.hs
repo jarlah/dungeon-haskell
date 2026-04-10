@@ -27,6 +27,7 @@ module Game.Logic.Quest
   , isReady
   , questDescription
   , questProgressLabel
+  , fireQuestEvent
   ) where
 
 -- | What a quest is asking the player to accomplish. The fields
@@ -171,3 +172,20 @@ questProgressLabel q
       GoalKillMonsters target -> show (min (qProgress q) target) ++ "/" ++ show target
       GoalReachDepth   target -> show (min (qProgress q) target) ++ "/" ++ show target
       GoalKillBoss            -> show (min (qProgress q) 1) ++ "/1"
+
+fireQuestEvent :: QuestEvent -> [Quest] -> ([Quest], [String])
+fireQuestEvent event quests =
+  let after = advanceAll event quests
+      -- Pair old and new by position; a quest "just became ready"
+      -- if it wasn't ready before and is now. Under M12 goal-met
+      -- quests flip to 'QuestReadyToTurnIn' (not 'QuestCompleted')
+      -- so this is the right place to tell the player their quest
+      -- is waiting on a turn-in.
+      newlyReady  =
+        [ qName q'
+        | (q, q') <- zip quests after
+        , not (isReady q)
+        , isReady q'
+        ]
+      msgs = [ "Quest ready to turn in: " ++ n ++ "!" | n <- newlyReady ]
+  in (after, msgs)

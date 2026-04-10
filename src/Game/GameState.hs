@@ -29,7 +29,6 @@ module Game.GameState
   , runRank
   , playerUseItem
   , playerAttack
-  , applyHitResult
   , fireArrow
   , playerOpenChest
   , chestAt
@@ -53,21 +52,21 @@ import qualified Game.Logic.Combat as C
 import qualified Game.Logic.Dungeon as D
 import qualified Game.Logic.FOV as FOV
 import qualified Game.Logic.Inventory as Inv
-import qualified Game.Logic.Loot as Loot
 import qualified Game.Logic.Ranged as Ranged
 import qualified Game.Logic.Movement as M
 import qualified Game.Logic.Progression as P
 import Game.Logic.MonsterAI (MonsterIntent(..), monsterIntent)
 import Game.Logic.Quest
   ( Quest(..), QuestEvent(..), QuestGoal(..), QuestStatus(..)
-  , advanceAll, isReady, mkQuest
+  , mkQuest, fireQuestEvent
   )
 import Data.Maybe (isJust)
 import Game.State.Types
   ( LaunchOption(..), GameState(..), NPC(..), ParkedLevel(..)
   , LaunchMenu(..), SaveMenu(..), SaveMenuMode(..), SaveMenuEntry(..)
-  , DirectionalAction(..)
+  , DirectionalAction(..), emit
   )
+import Game.Utils.List (updateAt, removeAt)
 
 -- | The fixed order of options on the launch screen. Kept as a
 --   top-level list so the renderer and the key handler agree on
@@ -498,7 +497,8 @@ wizCmdDescend gs =
         Nothing ->
           generateAndEnter nextDepth gsParked
       gs'' = wizMsg ("descended to depth " ++ show nextDepth ++ ".") gs'
-  in fireQuestEvent (EvEnteredDepth nextDepth) gs''
+      (quests', qMsgs) = fireQuestEvent (EvEnteredDepth nextDepth) (gsQuests gs'')
+    in gs'' { gsQuests = quests', gsMessages = reverse qMsgs ++ gsMessages gs'' }
 
 -- | Force-ascend. Refuses at depth 1 with a message, otherwise
 --   behaves like 'playerAscend' minus the stairs-tile check.
@@ -594,51 +594,6 @@ applyAction act gs0 =
                       case M.tryMove (gsLevel gs) (gsPlayerPos gs) dir of
                         Just newPos -> processMonsters (gs { gsPlayerPos = newPos })
                         Nothing     -> gs  -- blocked; turn does not advance
-
--- | Append events to the running per-turn log.
-emit :: GameState -> [GameEvent] -> GameState
-emit gs evs = gs { gsEvents = gsEvents gs ++ evs }
-
--- | Run a 'QuestEvent' through every quest in 'gsQuests' and surface
---   a "Quest complete: NAME!" message for any quest that flips from
---   non-completed to completed as a result. Returns the updated
---   state with the new quest list and any completion messages
---   prepended to 'gsMessages'.
-fireQuestEvent :: QuestEvent -> GameState -> GameState
-fireQuestEvent ev gs =
-  let before      = gsQuests gs
-      after       = advanceAll ev before
-      -- Pair old and new by position; a quest "just became ready"
-      -- if it wasn't ready before and is now. Under M12 goal-met
-      -- quests flip to 'QuestReadyToTurnIn' (not 'QuestCompleted')
-      -- so this is the right place to tell the player their quest
-      -- is waiting on a turn-in.
-      newlyReady  =
-        [ qName q'
-        | (q, q') <- zip before after
-        , not (isReady q)
-        , isReady q'
-        ]
-      msgs = [ "Quest ready to turn in: " ++ n ++ "!" | n <- newlyReady ]
-  in gs { gsQuests   = after
-        , gsMessages = reverse msgs ++ gsMessages gs
-        }
-
--- | Map a combat result to the event the *attacker* cares about
---   when the attacker is the player.
-playerCombatEvent :: C.CombatResult -> GameEvent
-playerCombatEvent C.Miss            = EvAttackMiss
-playerCombatEvent (C.Hit _)         = EvAttackHit
-playerCombatEvent (C.CriticalHit _) = EvAttackCrit
-playerCombatEvent (C.Kill _)        = EvMonsterKilled
-
--- | Map a combat result to the event for the player being hit.
---   'Nothing' means "no sound for this" (we skip monster whiffs).
-monsterCombatEvent :: C.CombatResult -> Maybe GameEvent
-monsterCombatEvent C.Miss            = Nothing
-monsterCombatEvent (C.Hit _)         = Just EvPlayerHurt
-monsterCombatEvent (C.CriticalHit _) = Just EvPlayerHurt
-monsterCombatEvent (C.Kill _)        = Just EvPlayerDied
 
 -- | Find a monster occupying the given tile, if any. Uses
 --   'monsterOccupies' so that multi-tile bosses resolve on any
@@ -996,7 +951,7 @@ playerAttack gs i m =
   let playerCombat   = Inv.effectiveStats (gsPlayerStats gs) (gsInventory gs)
       (result, gen') = C.resolveAttack (gsRng gs) playerCombat (mStats m)
       msg            = C.describeAttack result (monsterName (mKind m))
-  in applyHitResult gs { gsRng = gen' } i m result [msg]
+  in C.applyHitResult gs { gsRng = gen' } i m result [msg]
 
 -- | Ranged attack: fire one arrow in the given direction. The
 --   caller in 'applyAction' uses the arrow-count delta to decide
@@ -1031,110 +986,12 @@ fireArrow dir gs =
           pushMsg msg (decArrow gs)
         Ranged.ShotLanded i m result msg gen' ->
           let gs' = (decArrow gs) { gsRng = gen' }
-          in applyHitResult gs' i m result [msg]
+          in C.applyHitResult gs' i m result [msg]
   where
     pushMsg m s = s { gsMessages = m : gsMessages s }
     decArrow s  =
       let inv = gsInventory s
       in s { gsInventory = inv { invArrows = invArrows inv - 1 } }
-
--- | Shared post-resolution pipeline for any player-initiated hit
---   on a monster, whether from melee ('playerAttack') or ranged
---   ('Ranged.fireArrow'). Given:
---
---     * the game state with the /already-advanced/ RNG (the caller
---       is responsible for threading 'gsRng' through its own dice
---       rolls before handing us the state),
---     * the monster's index in 'gsMonsters' at the moment of
---       resolution,
---     * the monster record itself (used for kind, position, name),
---     * the 'C.CombatResult' from 'C.resolveAttack' / 'C.resolveWith',
---     * zero or more caller-supplied message lines to prepend under
---       the loot/level-up messages (the combat-line itself is
---       typically the only entry),
---
---   this helper:
---     * applies the damage to the monster,
---     * removes or updates the monster entry,
---     * rolls loot if the blow was fatal,
---     * awards XP and synthesises level-up messages,
---     * emits the right combat events ('EvAttackHit' / 'EvAttackCrit'
---       / 'EvMonsterKilled' / 'EvBossKilled'),
---     * freezes the run clock into 'gsFinalTurns' and flips
---       'gsVictory' on a boss kill,
---     * fires quest events ('EvKilledMonster' / 'EvKilledBoss')
---       so quests progress from either code path.
---
---   Centralising this means ranged kills win the game the same way
---   melee kills do, without the boss-victory snapshot being
---   accidentally duplicated or forgotten.
-applyHitResult
-  :: GameState
-  -> Int
-  -> Monster
-  -> C.CombatResult
-  -> [String]
-  -> GameState
-applyHitResult gs i m result hitMsgs =
-  let newMStats      = C.applyDamage (mStats m) (Damage (C.resultDamage result))
-      killed         = C.isDead newMStats
-      wasBoss        = isBoss (mKind m)
-      combatEv       = playerCombatEvent result
-      (playerStats', levelMsgs, levelEvs) =
-        if killed
-          then
-            let reward     = P.xpReward (mKind m)
-                (s', ups)  = P.gainXP (gsPlayerStats gs) reward
-                startLevel = sLevel (gsPlayerStats gs)
-                endLevel   = sLevel s'
-                msgs = [ "You reach level " ++ show l ++ "!"
-                       | l <- [endLevel, endLevel - 1 .. startLevel + 1]
-                       ]
-                evs  = replicate ups EvLevelUp
-            in (s', msgs, evs)
-          else (gsPlayerStats gs, [], [])
-      monsters' =
-        if killed
-          then removeAt i (gsMonsters gs)
-          else updateAt i (\mo -> mo { mStats = newMStats }) (gsMonsters gs)
-      -- Roll loot drops at the monster's tile if the blow was fatal.
-      (loot, gen'') =
-        if killed
-          then Loot.rollLoot (gsRng gs) (mKind m)
-          else ([], gsRng gs)
-      lootMsgs =
-        [ "The " ++ monsterName (mKind m) ++ " drops a " ++ itemName it ++ "."
-        | it <- loot
-        ]
-      itemsOnFloor' =
-        gsItemsOnFloor gs ++ [ (mPos m, it) | it <- loot ]
-      bossEvs  = [ EvBossKilled | killed && wasBoss ]
-      bossMsgs = [ "With a final roar, the " ++ monsterName (mKind m)
-                   ++ " falls. You are victorious!"
-                 | killed && wasBoss ]
-      victory' = gsVictory gs || (killed && wasBoss)
-      finalTurns' = case gsFinalTurns gs of
-        Just _  -> gsFinalTurns gs
-        Nothing
-          | victory' && not (gsVictory gs) -> Just (gsTurnsElapsed gs)
-          | otherwise                      -> Nothing
-      gs' = emit
-        gs
-          { gsMonsters     = monsters'
-          , gsPlayerStats  = playerStats'
-          , gsRng          = gen''
-          , gsMessages     =
-              reverse lootMsgs ++ bossMsgs ++ levelMsgs
-                ++ reverse hitMsgs ++ gsMessages gs
-          , gsItemsOnFloor = itemsOnFloor'
-          , gsVictory      = victory'
-          , gsFinalTurns   = finalTurns'
-          }
-        (combatEv : levelEvs ++ bossEvs)
-      questEvs = if wasBoss then [EvKilledMonster, EvKilledBoss]
-                            else [EvKilledMonster]
-      fireAll gss = foldl (flip fireQuestEvent) gss questEvs
-  in if killed then fireAll gs' else gs'
 
 ------------------------------------------------------------
 -- Items
@@ -1544,7 +1401,8 @@ playerDescend gs =
             Nothing ->
               generateAndEnter nextDepth gsParked
           gs'' = gs' { gsMessages = ("You descend to depth " ++ show nextDepth ++ ".") : gsMessages gs' }
-      in fireQuestEvent (EvEnteredDepth nextDepth) gs''
+          (quests', qMsgs) = fireQuestEvent (EvEnteredDepth nextDepth) (gsQuests gs'')
+      in gs'' { gsQuests = quests', gsMessages = reverse qMsgs ++ gsMessages gs'' }
     _ ->
       gs { gsMessages = "There are no stairs down here." : gsMessages gs }
 
@@ -1732,7 +1590,7 @@ monsterAttack gs m =
       msg             = C.describeAttacked result (monsterName (mKind m))
       died            = C.isDead newPlayerStats
       newMsgs         = if died then ["You die...", msg] else [msg]
-      evs             = case monsterCombatEvent result of
+      evs             = case C.monsterCombatEvent result of
         Just e  -> [e]
         Nothing -> []
   in emit
@@ -1743,13 +1601,3 @@ monsterAttack gs m =
          , gsDead        = died
          }
        evs
-
-------------------------------------------------------------
--- List helpers
-------------------------------------------------------------
-
-updateAt :: Int -> (a -> a) -> [a] -> [a]
-updateAt i f xs = take i xs ++ [f (xs !! i)] ++ drop (i + 1) xs
-
-removeAt :: Int -> [a] -> [a]
-removeAt i xs = take i xs ++ drop (i + 1) xs

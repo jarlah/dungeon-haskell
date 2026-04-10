@@ -9,6 +9,7 @@ module Game.State.Types
 , SaveMenuEntry(..)
 , LaunchMenu(..)
 , DirectionalAction(..)
+, emit
 ) where
 
 import Game.Types (KeyId, DungeonLevel, Monster, Item, Pos, Inventory, GameEvent, Stats)
@@ -388,3 +389,6 @@ data NPC = NPC
     --   it here so the player can come back later.
   } deriving (Eq, Show)
   
+-- | Append events to the running per-turn log.
+emit :: GameState -> [GameEvent] -> GameState
+emit gs evs = gs { gsEvents = gsEvents gs ++ evs }
