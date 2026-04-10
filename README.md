@@ -188,41 +188,35 @@ Open the prompt with `/` and type one of:
 | `/descend`             | jump to the next floor                   |
 | `/ascend`              | jump to the previous floor               |
 
-## Project layout
-
-```
-app/Main.hs             thin Brick shell: wires up audio, AI runtime, and the
-                        launch state; dispatches each key event to a handler
-                        in Game.UI.*
-src/Game/Types.hs       core ADTs (Tile, Monster, Item, Stats, ...)
-src/Game/GameState.hs   the whole-world snapshot + applyAction / applyCommand
-src/Game/Logic/         pure game logic (Movement, Combat, FOV, Dungeon,
-                        Inventory, Loot, Quest, Progression, Command, MonsterAI)
-src/Game/UI/            per-modal key handlers extracted from Main: Types,
-                        Normal, Prompt, Modals, Launch, SaveMenu. Each owns
-                        one screen's keymap and exposes pure helpers that
-                        the test suite can drive without a Brick runtime.
-src/Game/Render.hs      Brick widgets for the map, HUD, and every modal
-src/Game/Input.hs       key → GameAction mapping
-src/Game/Audio.hs       proteaaudio-sdl shell (best-effort, degrades to silent)
-src/Game/Save.hs        binary save/load with a magic+version header
-src/Game/Save/Types.hs  shared save types (factored out to break a cycle)
-src/Game/AI/            optional LLM worker: async HTTP client, prompt
-                        templates, and the Runtime that bridges the worker
-                        thread and the Brick event loop
-src/Game/Config.hs      YAML config loader (AI endpoint, feature flags)
-test/                   HSpec + QuickCheck suite, auto-discovered
-assets/music            CC0 dungeon + boss music loops
-assets/sfx              CC0 combat and UI sound effects
-docs/plan.md            milestone-by-milestone planning doc
-scripts/release.sh      Dockerized portable-binary release script
-```
+## Architecture
 
 The library is deliberately factored so every game rule is testable
 in isolation: `applyAction` is a pure `GameState -> GameState`
 function, Brick and the audio shell are the only places that touch
 `IO`, and the save layer is the single module that knows about
 `Data.Binary`.
+
+### Context / Outcome pattern
+
+Logic modules in `src/Game/Logic/` never import `GameState` for
+their core algorithms. Instead, when a function needs several
+`GameState` fields, the module defines:
+
+- A **Context** record containing only the fields the function reads.
+- A `fromGameState` constructor (`combatContext`, `dashContext`, …)
+  that builds the Context from a live `GameState`.
+- An **Outcome** record (when the function produces structured
+  results) containing only the *new* data — not accumulated state.
+- An `applyOutcome` function that wires the Outcome back into
+  `GameState`.
+
+Both the Context/Outcome types and the mapping functions live in the
+same module as the function they serve, keeping each module
+self-contained. `Game.Core` (the glue layer) calls the constructor,
+invokes the pure function, and applies the outcome.
+
+This keeps the pure logic testable without `GameState` and avoids
+long positional parameter lists that are easy to misorder.
 
 ## Credits
 

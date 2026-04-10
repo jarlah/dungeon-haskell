@@ -1,3 +1,8 @@
 {
-  "customInstructions": ["Never add Co-Authored-By lines to git commits"]
+  "customInstructions": [
+    "Never add Co-Authored-By lines to git commits",
+    "When a pure logic function in src/Game/Logic/ takes 4+ GameState fields as separate parameters, use the Context/Outcome pattern: define a Context record for inputs and (if needed) an Outcome record for results, with fromGameState and applyOutcome helpers, all in the same module as the function. Game.Core calls the constructor, invokes the function, and applies the outcome.",
+    "Logic modules own their Context/Outcome types and the GameState mapping functions — do not put these in Game.Core or Game.State.Types.",
+    "Outcome records should contain only new data produced by the function, not accumulated state passed through unchanged."
+  ]
 }
