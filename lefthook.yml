@@ -1,0 +1,9 @@
+pre-commit:
+  commands:
+    build:
+      run: stack build
+    test:
+      run: stack test
+    hlint:
+      glob: "*.hs"
+      run: hlint src/ test/

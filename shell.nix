@@ -30,6 +30,8 @@ pkgs.mkShell {
     pkgs.gmp
     pkgs.gcc
     pkgs.git
+    pkgs.lefthook
+    pkgs.hlint
   ];
 
   # Stack detects IN_NIX_SHELL and skips its own nested nix-shell
@@ -37,5 +39,6 @@ pkgs.mkShell {
   # GHC we provide here instead of spawning a second shell.
   shellHook = ''
     export LANG=en_US.UTF-8
+    lefthook install
   '';
 }
