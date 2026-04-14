@@ -72,8 +72,8 @@ spec = do
           expectationFailure
             ("expected SaveCorrupt, got: " ++ show other)
 
-    it "saveMagic is exactly DHSAVE12" $
-      saveMagic `shouldBe` BL8.pack "DHSAVE12"
+    it "saveMagic is exactly DHSAVE13" $
+      saveMagic `shouldBe` BL8.pack "DHSAVE13"
 
   describe "Game.Save.decodeHeader" $ do
 

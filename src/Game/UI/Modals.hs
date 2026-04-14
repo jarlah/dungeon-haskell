@@ -23,6 +23,7 @@ module Game.UI.Modals
   , directionFromKey
   , handleInventoryKey
   , handleLockedDoorKey
+  , handleVolumeMixerKey
     -- * Shared audio helper
   , playEventsFor
     -- * Pure helpers (exposed for testing)
@@ -30,6 +31,8 @@ module Game.UI.Modals
   , stepDialogueAccept
   , stepDialogueTurnIn
   , stepQuestLogSelect
+  , volumeStep
+  , clampVolume
   ) where
 
 import Brick
@@ -38,7 +41,7 @@ import Brick
   )
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad (when)
-import Data.Char (isAsciiLower, isAsciiUpper, ord)
+import Data.Char (isAsciiLower, isAsciiUpper, ord, isDigit)
 import qualified Graphics.Vty as V
 
 import Game.AI.Runtime (AIRuntime)
@@ -232,6 +235,80 @@ handleInventoryKey _ _ = pure ()
 handleLockedDoorKey :: V.Key -> EventM Name GameState ()
 handleLockedDoorKey _ =
   modify (\gs -> gs { gsLockedDoorPrompt = Nothing })
+
+-- | Keystrokes while the volume mixer modal is open.
+--
+--   * 'Esc' closes the modal.
+--   * @h@ / Left / @<@ / @,@ nudge the focused channel 5 % softer.
+--   * @l@ / Right / @>@ / @.@ nudge the focused channel 5 % louder.
+--   * @j@ / @k@ / Up / Down / Tab swap focus between the two
+--     channels (the modal only has two so up and down both toggle).
+--   * @0@..@9@ snap the focused channel to 0 %, 10 %, ... 90 %.
+--   * @m@ mutes the focused channel (snap to 0 %).
+--
+--   Changes to the state fields are synced to the audio layer by
+--   the event handler in "Main" right after this runs, so this
+--   handler stays free of IO.
+handleVolumeMixerKey :: V.Key -> EventM Name GameState ()
+handleVolumeMixerKey key = case key of
+  V.KEsc         -> closeMixer
+  V.KChar 'h'    -> adjust (subtract volumeStep)
+  V.KLeft        -> adjust (subtract volumeStep)
+  V.KChar ','    -> adjust (subtract volumeStep)
+  V.KChar '<'    -> adjust (subtract volumeStep)
+  V.KChar 'l'    -> adjust (+ volumeStep)
+  V.KRight       -> adjust (+ volumeStep)
+  V.KChar '.'    -> adjust (+ volumeStep)
+  V.KChar '>'    -> adjust (+ volumeStep)
+  V.KChar 'j'    -> swapFocus
+  V.KChar 'k'    -> swapFocus
+  V.KDown        -> swapFocus
+  V.KUp          -> swapFocus
+  V.KBackTab     -> swapFocus
+  V.KChar '\t'   -> swapFocus
+  V.KChar 'm'    -> setFocused 0
+  V.KChar c
+    | isDigit c ->
+        setFocused (fromIntegral (fromEnum c - fromEnum '0') * 0.1)
+  _              -> pure ()
+  where
+    closeMixer = modify (\gs -> gs { gsVolumeMixer = Nothing })
+
+    adjust :: (Double -> Double) -> EventM Name GameState ()
+    adjust f = modify $ \gs ->
+      case gsVolumeMixer gs of
+        Nothing -> gs
+        Just vm -> case vmCursor vm of
+          VolMusic -> gs { gsMusicVolume = clampVolume (f (gsMusicVolume gs)) }
+          VolSfx   -> gs { gsSfxVolume   = clampVolume (f (gsSfxVolume gs))   }
+
+    setFocused :: Double -> EventM Name GameState ()
+    setFocused v = modify $ \gs ->
+      case gsVolumeMixer gs of
+        Nothing -> gs
+        Just vm -> case vmCursor vm of
+          VolMusic -> gs { gsMusicVolume = clampVolume v }
+          VolSfx   -> gs { gsSfxVolume   = clampVolume v }
+
+    swapFocus :: EventM Name GameState ()
+    swapFocus = modify $ \gs ->
+      case gsVolumeMixer gs of
+        Nothing -> gs
+        Just vm ->
+          let nextCursor = case vmCursor vm of
+                VolMusic -> VolSfx
+                VolSfx   -> VolMusic
+          in gs { gsVolumeMixer = Just vm { vmCursor = nextCursor } }
+
+-- | Per-keystroke volume nudge — 5 % of the full range. Matches
+--   the 20-cell slider in the mixer modal, so each press moves
+--   the visual bar by exactly one cell.
+volumeStep :: Double
+volumeStep = 0.05
+
+-- | Clamp a volume setting to the 0..1 range.
+clampVolume :: Double -> Double
+clampVolume = max 0.0 . min 1.0
 
 -- | Fire SFX for every GameEvent the last action produced.
 --   Extracted so the inventory and normal paths share one place

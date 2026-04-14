@@ -155,6 +155,8 @@ drawGame wizardEnabled aiOn gs =
            | gsConfirmQuit  gs  -> [drawQuitConfirmModal, baseLayer]
            | gsHelpOpen     gs  -> [drawHelpModal wizardEnabled, baseLayer]
            | Just sm <- gsSaveMenu gs -> [drawSaveMenuModal sm, baseLayer]
+           | Just vm <- gsVolumeMixer gs ->
+               [drawVolumeMixerModal gs vm, baseLayer]
            | gsQuestLogOpen gs  -> [drawQuestLogModal gs, baseLayer]
            | gsInventoryOpen gs -> [drawInventoryModal gs, baseLayer]
            | Just keyNm <- gsLockedDoorPrompt gs ->
@@ -456,6 +458,55 @@ drawQuitConfirmModal =
         , str "  n / Esc : keep playing"
         ]
 
+-- | Centered modal with a music and an SFX volume slider. The
+--   cursor highlights whichever channel is currently focused;
+--   h / l (or Left / Right) nudge the focused slider in 5%
+--   increments, 0..9 snap it to 0 %..90 %, and j / k (or Up /
+--   Down, Tab) swap focus between the two. The slider is a
+--   20-cell bar (each cell = 5 %) so the step size aligns
+--   with the visual granularity.
+drawVolumeMixerModal :: GameState -> VolumeMixer -> Widget Name
+drawVolumeMixerModal gs vm =
+  let cursor = vmCursor vm
+      musicRow = renderRow "Music" (cursor == VolMusic) (gsMusicVolume gs)
+      sfxRow   = renderRow "SFX  " (cursor == VolSfx)   (gsSfxVolume gs)
+      body = vBox
+        [ str "Adjust master volume for music and sound effects."
+        , str ""
+        , musicRow
+        , sfxRow
+        , str ""
+        , str "  h / l or </>     softer / louder  (5%)"
+        , str "  j / k or Tab     switch channel"
+        , str "  0..9             jump to  0% .. 90%"
+        , str "  m                mute focused channel"
+        , str "  Esc              close"
+        ]
+  in modalFrame (hLimit 56) "Volume" body
+  where
+    renderRow label focused v =
+      let marker  = if focused then " > " else "   "
+          bar     = volumeBar v
+          percent = volumePercent v
+          line    = marker ++ label ++ "  [" ++ bar ++ "] " ++ percent
+      in str line
+
+    -- 20-cell bar where each cell represents 5% of the full range.
+    -- The filled and empty cells use glyphs that render well on a
+    -- bare terminal without ever needing truecolor or extra attrs.
+    volumeBar v =
+      let cells = 20 :: Int
+          filled = max 0 . min cells $ round (v * fromIntegral cells :: Double)
+      in replicate filled '#' ++ replicate (cells - filled) '-'
+
+    volumePercent v =
+      let pct = max 0 . min 100 $ round (v * 100 :: Double) :: Int
+          padded
+            | pct < 10  = "  " ++ show pct
+            | pct < 100 = " "  ++ show pct
+            | otherwise = show pct
+      in padded ++ "%"
+
 -- | Modal shown when the player bumps a locked door without the
 --   matching key. The name is the already-formatted key name
 --   (e.g. "brass key"); the modal exists purely to tell the
@@ -683,6 +734,14 @@ drawHelpModal wizardEnabled =
              , "  /save  /load         open save / load picker"
              , "  /quicksave  /qs      write the quicksave slot"
              , "  /quickload  /ql      read the quicksave slot"
+             , "  /volume /vol /mixer  open the volume mixer"
+             ]
+        ++ section "Volume mixer (/volume)"
+             [ "  h / l                softer / louder (5%)"
+             , "  j / k / Tab          switch channel"
+             , "  0-9                  snap to 0% .. 90%"
+             , "  m                    mute focused channel"
+             , "  Esc                  close"
              ]
         ++ wizardSection
         ++ section "Quitting"

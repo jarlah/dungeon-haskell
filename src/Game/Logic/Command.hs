@@ -56,6 +56,8 @@ data Command
     -- ^ write the current state to the quicksave slot
   | CmdQuickload
     -- ^ load the quicksave slot
+  | CmdVolume
+    -- ^ open the volume mixer modal
   -- Wizard / cheat commands — gated on the @--wizard@ CLI flag.
   | CmdReveal
     -- ^ mark every tile on the current level as explored
@@ -92,6 +94,7 @@ isCheatCommand cmd = case cmd of
   CmdLoad       -> False
   CmdQuicksave  -> False
   CmdQuickload  -> False
+  CmdVolume     -> False
   -- Wizard cheats.
   CmdReveal     -> True
   CmdHeal       -> True
@@ -129,6 +132,9 @@ parseCommand raw =
       "qs"         -> nullary CmdQuicksave  args
       "quickload"  -> nullary CmdQuickload  args
       "ql"         -> nullary CmdQuickload  args
+      "volume"     -> nullary CmdVolume     args
+      "vol"        -> nullary CmdVolume     args
+      "mixer"      -> nullary CmdVolume     args
       -- Wizard cheats.
       "reveal"    -> nullary CmdReveal args
       "heal"      -> nullary CmdHeal args

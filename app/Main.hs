@@ -29,7 +29,7 @@ import Game.UI.Launch (handleLaunchMenuKey)
 import Game.UI.Modals
   ( handleAwaitingDirectionKey, handleConfirmQuitKey, handleDialogueKey
   , handleHelpKey, handleInventoryKey, handleLockedDoorKey
-  , handleQuestLogKey, handleVictoryKey
+  , handleQuestLogKey, handleVictoryKey, handleVolumeMixerKey
   )
 import Game.UI.Normal (handleNormalKey)
 import Game.UI.Prompt (handlePromptKey)
@@ -84,6 +84,7 @@ handleEvent mAudio aiRt rFlags (VtyEvent (V.EvKey key mods)) = do
       | gsVictory gs                -> handleVictoryKey key
       | gsHelpOpen gs               -> handleHelpKey key
       | Just sm  <- gsSaveMenu gs   -> handleSaveMenuKey rFlags sm key
+      | Just _   <- gsVolumeMixer gs -> handleVolumeMixerKey key
       | Just buf <- gsPrompt gs     -> handlePromptKey mAudio rFlags key buf
       | Just i   <- gsDialogue gs   -> handleDialogueKey mAudio aiRt i key
       | gsQuestLogOpen gs           -> handleQuestLogKey key
@@ -97,6 +98,11 @@ handleEvent mAudio aiRt rFlags (VtyEvent (V.EvKey key mods)) = do
   -- player may have just walked into the boss room's line of sight,
   -- or descended onto the boss floor, or climbed back off it.
   updateMusicFor mAudio
+  -- Mirror the pure 'gsMusicVolume' / 'gsSfxVolume' fields into
+  -- the audio system so any change (mixer tweak, save load) takes
+  -- effect immediately. The setters are no-ops when the value
+  -- hasn't actually moved, so this is cheap to call every tick.
+  syncAudioVolumes mAudio
   -- If that keystroke opened a dialogue with an NPC we haven't
   -- generated a greeting for yet, fire the request now. Safe to
   -- call unconditionally — the helper is a no-op when AI is
@@ -127,6 +133,19 @@ updateMusicFor (Just audio) = do
                 then Audio.BossMusic
                 else Audio.DungeonMusic
   liftIO $ Audio.setMusic audio track
+
+-- | Push the current 'gsMusicVolume' / 'gsSfxVolume' values into the
+--   audio layer. Called after every key event so the mixer modal
+--   can just mutate 'GameState' and trust this helper to propagate
+--   the change; a freshly loaded save is handled by the same code
+--   path. A silent run ('Nothing') skips the whole thing.
+syncAudioVolumes :: Maybe Audio.AudioSystem -> EventM Name GameState ()
+syncAudioVolumes Nothing      = pure ()
+syncAudioVolumes (Just audio) = do
+  gs <- get
+  liftIO $ do
+    Audio.setMusicVolume audio (gsMusicVolume gs)
+    Audio.setSfxVolume   audio (gsSfxVolume   gs)
 
 --------------------------------------------------------------------
 -- main
@@ -161,11 +180,14 @@ main = do
   -- it wholesale with a deserialized 'GameState'. Sampling the
   -- save directory once at startup is enough because the menu
   -- stays open until the player commits to one path.
-  let initialState = (newGame gen defaultLevelConfig)
+  let audioCfg = Config.gcAudio gameCfg
+      initialState = (newGame gen defaultLevelConfig)
         { gsLaunchMenu = Just LaunchMenu
             { lmCursor   = 0
             , lmHasSaves = hasSaves
             }
+        , gsMusicVolume = Config.acMusicVolume audioCfg
+        , gsSfxVolume   = Config.acSfxVolume   audioCfg
         }
       buildVty = VCP.mkVty V.defaultConfig
 

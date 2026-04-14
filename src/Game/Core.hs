@@ -8,6 +8,8 @@ module Game.Core
   , SaveMenuEntry(..)
   , DirectionalAction(..)
   , SaveMenu(..)
+  , VolumeMixer(..)
+  , VolumeChannel(..)
   , launchOptions
   , mkGameState
   , newGame
@@ -63,7 +65,7 @@ import Data.Maybe (isJust)
 import Game.State.Types
   ( LaunchOption(..), GameState(..), NPC(..), ParkedLevel(..)
   , LaunchMenu(..), SaveMenu(..), SaveMenuMode(..), SaveMenuEntry(..)
-  , DirectionalAction(..), emit
+  , DirectionalAction(..), VolumeMixer(..), VolumeChannel(..), emit
   )
 import Game.Utils.List (updateAt, removeAt, safeIndex)
 import Game.Logic.Constants
@@ -129,6 +131,9 @@ mkGameState gen dl start monsters = recomputeVisibility GameState
   , gsPotionsUsed       = 0
   , gsSavesUsed         = 0
   , gsFinalTurns        = Nothing
+  , gsMusicVolume       = 0.7
+  , gsSfxVolume         = 1.0
+  , gsVolumeMixer       = Nothing
   }
 
 -- | Refresh 'gsVisible' from the player's current position and fold

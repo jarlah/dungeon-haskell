@@ -128,6 +128,8 @@ dispatchCommand mAudio rFlags cmd = case routeCommand rFlags cmd of
   EffSaveMenu mode -> openSaveMenu rFlags mode
   EffQuicksave     -> doQuicksave
   EffQuickload     -> doQuickload
+  EffOpenMixer ->
+    modify (\gs -> gs { gsVolumeMixer = Just VolumeMixer { vmCursor = VolMusic } })
   EffCheatBlocked ->
     modify $ \gs -> gs
       { gsMessages =
@@ -157,6 +159,8 @@ data CommandEffect
     -- ^ Free-action quicksave.
   | EffQuickload
     -- ^ Free-action quickload.
+  | EffOpenMixer
+    -- ^ Open the volume mixer modal.
   | EffCheatBlocked
     -- ^ The command is a cheat and @--wizard@ was not passed —
     --   report the refusal in the message log.
@@ -178,6 +182,7 @@ routeCommand rFlags cmd = case cmd of
   CmdLoad       -> EffSaveMenu LoadMode
   CmdQuicksave  -> EffQuicksave
   CmdQuickload  -> EffQuickload
+  CmdVolume     -> EffOpenMixer
   _
     | isCheatCommand cmd, not (rfWizardEnabled rFlags) -> EffCheatBlocked
     | otherwise -> EffApplyCommand cmd

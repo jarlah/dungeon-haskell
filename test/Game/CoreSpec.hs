@@ -82,6 +82,9 @@ mkFixture seed ppos pstats monsters = GameState
   , gsSavesUsed         = 0
   , gsFinalTurns        = Nothing
   , gsChests            = []
+  , gsMusicVolume       = 0.7
+  , gsSfxVolume         = 1.0
+  , gsVolumeMixer       = Nothing
   }
 
 -- | Player stats strong enough to one-shot anything normal.

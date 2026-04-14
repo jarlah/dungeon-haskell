@@ -12,12 +12,16 @@ module Game.Audio
   , shutdownAudio
   , playEvent
   , setMusic
+  , setMusicVolume
+  , setSfxVolume
+  , getMusicVolume
+  , getSfxVolume
   ) where
 
 import Control.Concurrent (ThreadId, forkIO, killThread, threadDelay)
 import Control.Exception (try, SomeException)
 import Control.Monad (forM_, void, when)
-import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
+import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
 import qualified Sound.ProteaAudio.SDL as PA
 
 import Game.Config (AudioConfig(..))
@@ -52,6 +56,10 @@ data MusicState = MusicState
 -- | Loaded sample handles plus the currently-looping music state.
 --   'asMusicRef' is mutable so the game can swap tracks mid-run
 --   (boss encounter) without tearing down the whole audio system.
+--   'asMusicVolRef' and 'asSfxVolRef' hold the user-adjustable
+--   master volumes; both the looping-music updater and the per-SFX
+--   play path read them on each use so the volume mixer modal can
+--   change them live without tearing anything down.
 data AudioSystem = AudioSystem
   { asMiss         :: !PA.Sample
   , asHit          :: !PA.Sample
@@ -66,7 +74,21 @@ data AudioSystem = AudioSystem
     --   missing (graceful fallback: the loop stays the same but
     --   the plumbing still exercises the swap code path)
   , asMusicRef     :: !(IORef MusicState)
+  , asMusicVolRef  :: !(IORef Double)
+    -- ^ master music volume in [0, 1]. The looping music Sound is
+    --   updated whenever this changes; fade workers also read it
+    --   on every step so a volume change mid-fade is respected.
+  , asSfxVolRef    :: !(IORef Double)
+    -- ^ master SFX volume in [0, 1]. Read by 'playEvent' on every
+    --   fire so changes take effect on the next event, no sample
+    --   reload needed.
   }
+
+-- | Base attenuation baked into the music sample at load time. The
+--   user's music volume multiplies into this at play / update time
+--   so the volume mixer can ramp the loop up and down live.
+musicBase :: Float
+musicBase = 0.35
 
 -- | Total duration of a cross-fade, in milliseconds. Long enough
 --   that the transition is audible (the dungeon theme visibly
@@ -93,15 +115,19 @@ initAudio cfg = do
   if not ok
     then pure Nothing
     else do
-      let musicVol = realToFrac (acMusicVolume cfg)
-          sfxVol   = realToFrac (acSfxVolume cfg)
+      let musicVol0 = clamp01 (acMusicVolume cfg)
+          sfxVol0   = clamp01 (acSfxVolume cfg)
+          musicVolF = realToFrac musicVol0 :: Float
       result <- (try $ do
         -- Music first: dungeon theme is required, boss theme is
         -- optional and falls back to the dungeon sample if missing
-        -- so the swap code still exercises cleanly.
-        dungeonMusic <- PA.sampleFromFile "assets/music/theme.ogg" (0.35 * musicVol)
-        bossMusic    <- loadOrFallback "assets/music/boss.ogg" (0.35 * musicVol) dungeonMusic
-        musicSound   <- PA.soundLoop dungeonMusic 1.0 1.0 0.0 1.0
+        -- so the swap code still exercises cleanly. Samples are
+        -- loaded at a fixed base attenuation; the user-facing
+        -- volume is applied at play / update time so the mixer
+        -- modal can change it live.
+        dungeonMusic <- PA.sampleFromFile "assets/music/theme.ogg" musicBase
+        bossMusic    <- loadOrFallback "assets/music/boss.ogg" musicBase dungeonMusic
+        musicSound   <- PA.soundLoop dungeonMusic musicVolF musicVolF 0.0 1.0
         musicRef     <- newIORef MusicState
           { msCurrTrack  = DungeonMusic
           , msCurrSound  = musicSound
@@ -109,14 +135,18 @@ initAudio cfg = do
           , msFadeThread = Nothing
           , msFadeGen    = 0
           }
-        -- SFX.
-        miss    <- PA.sampleFromFile "assets/sfx/miss.ogg"    (0.7  * sfxVol)
-        hit     <- PA.sampleFromFile "assets/sfx/hit.ogg"     (0.8  * sfxVol)
-        crit    <- PA.sampleFromFile "assets/sfx/crit.ogg"    (1.0  * sfxVol)
-        kill    <- PA.sampleFromFile "assets/sfx/kill.ogg"    (0.9  * sfxVol)
-        hurt    <- PA.sampleFromFile "assets/sfx/hurt.ogg"    (0.85 * sfxVol)
-        died    <- PA.sampleFromFile "assets/sfx/died.ogg"    (1.0  * sfxVol)
-        levelUp <- PA.sampleFromFile "assets/sfx/levelup.ogg" (0.9  * sfxVol)
+        musicVolRef <- newIORef musicVol0
+        sfxVolRef   <- newIORef sfxVol0
+        -- SFX. Each sample bakes in its relative mix (so crit
+        -- lands louder than miss) but not the user's master SFX
+        -- volume — that's multiplied in at 'playEvent' time.
+        miss    <- PA.sampleFromFile "assets/sfx/miss.ogg"    0.7
+        hit     <- PA.sampleFromFile "assets/sfx/hit.ogg"     0.8
+        crit    <- PA.sampleFromFile "assets/sfx/crit.ogg"    1.0
+        kill    <- PA.sampleFromFile "assets/sfx/kill.ogg"    0.9
+        hurt    <- PA.sampleFromFile "assets/sfx/hurt.ogg"    0.85
+        died    <- PA.sampleFromFile "assets/sfx/died.ogg"    1.0
+        levelUp <- PA.sampleFromFile "assets/sfx/levelup.ogg" 0.9
         pure AudioSystem
           { asMiss         = miss
           , asHit          = hit
@@ -128,10 +158,15 @@ initAudio cfg = do
           , asDungeonMusic = dungeonMusic
           , asBossMusic    = bossMusic
           , asMusicRef     = musicRef
+          , asMusicVolRef  = musicVolRef
+          , asSfxVolRef    = sfxVolRef
           }) :: IO (Either SomeException AudioSystem)
       case result of
         Left _    -> PA.finishAudio >> pure Nothing
         Right sys -> pure (Just sys)
+
+clamp01 :: Double -> Double
+clamp01 = max 0.0 . min 1.0
 
 -- | Load a sample, falling back to a pre-loaded alternative if the
 --   file can't be loaded. Used for the boss music so missing assets
@@ -190,7 +225,7 @@ setMusic as target = do
       Right newSound -> do
         let prev   = msCurrSound ms
             newGen = msFadeGen ms + 1
-        tid <- forkIO (runFade (asMusicRef as) newGen prev newSound)
+        tid <- forkIO (runFade (asMusicRef as) (asMusicVolRef as) newGen prev newSound)
         atomicModifyIORef' (asMusicRef as) $ const
           ( MusicState
               { msCurrTrack  = target
@@ -202,20 +237,63 @@ setMusic as target = do
           , ()
           )
 
+-- | Update the master music volume. Writes the new value into the
+--   IORef so any in-flight fade worker picks it up on its next tick
+--   and future 'setMusic' calls use it, then nudges the currently
+--   looping sound via 'PA.soundUpdate' so the change is audible
+--   immediately even in the common no-fade case. Exceptions from
+--   the audio layer are swallowed: a volume slider should never
+--   crash the game. No-ops when the new value equals the old one
+--   so the event loop can call this unconditionally on every
+--   keystroke to keep 'GameState' and the audio layer in sync
+--   without burning soundUpdate calls.
+setMusicVolume :: AudioSystem -> Double -> IO ()
+setMusicVolume as v0 = do
+  let v = clamp01 v0
+  prev <- readIORef (asMusicVolRef as)
+  when (prev /= v) $ do
+    writeIORef (asMusicVolRef as) v
+    ms <- readIORef (asMusicRef as)
+    let f = realToFrac v :: Float
+    void (try (PA.soundUpdate (msCurrSound ms) False f f 0 1)
+           :: IO (Either SomeException Bool))
+
+-- | Update the master SFX volume. Just writes the IORef — the
+--   next 'playEvent' call reads it when launching its sample, so
+--   already-playing one-shots finish out at their previous level
+--   and only new triggers pick up the change.
+setSfxVolume :: AudioSystem -> Double -> IO ()
+setSfxVolume as v = writeIORef (asSfxVolRef as) (clamp01 v)
+
+-- | Read the current master music volume from the system. Used by
+--   the volume mixer modal to keep its on-screen state in sync
+--   with the audio layer without caching the value separately.
+getMusicVolume :: AudioSystem -> IO Double
+getMusicVolume as = readIORef (asMusicVolRef as)
+
+-- | Read the current master SFX volume from the system.
+getSfxVolume :: AudioSystem -> IO Double
+getSfxVolume as = readIORef (asSfxVolRef as)
+
 -- | Linear cross-fade worker: ramps @prev@ from full volume down
 --   to silence and @new@ from silence up to full volume in
---   'fadeSteps' equal ticks spanning 'fadeDurationMs'. At the end
---   it hard-stops @prev@ and clears the fade bookkeeping on the
---   shared state — but only if its own fade generation is still
---   current. Exceptions are swallowed (if the main thread has
---   already torn down audio, the worker just exits).
-runFade :: IORef MusicState -> Int -> PA.Sound -> PA.Sound -> IO ()
-runFade ref myGen prev new = do
+--   'fadeSteps' equal ticks spanning 'fadeDurationMs'. Each tick
+--   multiplies the ramp by the /current/ master music volume
+--   (read fresh from the IORef) so a mixer adjustment mid-fade
+--   is honoured. At the end it hard-stops @prev@ and clears the
+--   fade bookkeeping on the shared state — but only if its own
+--   fade generation is still current. Exceptions are swallowed
+--   (if the main thread has already torn down audio, the worker
+--   just exits).
+runFade :: IORef MusicState -> IORef Double -> Int -> PA.Sound -> PA.Sound -> IO ()
+runFade ref volRef myGen prev new = do
   let stepUs = (fadeDurationMs * 1000) `div` fadeSteps
   _ <- (try $ forM_ [1 .. fadeSteps] $ \i -> do
           let t = fromIntegral i / fromIntegral fadeSteps :: Float
-          _ <- PA.soundUpdate prev False (1 - t) (1 - t) 0 1
-          _ <- PA.soundUpdate new  False t       t       0 1
+          vol <- readIORef volRef
+          let v = realToFrac vol :: Float
+          _ <- PA.soundUpdate prev False ((1 - t) * v) ((1 - t) * v) 0 1
+          _ <- PA.soundUpdate new  False (t       * v) (t       * v) 0 1
           threadDelay stepUs) :: IO (Either SomeException ())
   _ <- try (PA.soundStop prev) :: IO (Either SomeException Bool)
   -- Only clear the fade bookkeeping if *this* fade generation is
@@ -228,7 +306,9 @@ runFade ref myGen prev new = do
 
 -- | Fire the SFX for a single 'GameEvent'. Non-blocking. Exceptions
 --   from the audio layer are swallowed so a glitch can't crash the
---   game.
+--   game. The master SFX volume is read from 'asSfxVolRef' at the
+--   moment of firing so the mixer modal's most recent setting
+--   applies to every new event.
 playEvent :: AudioSystem -> GameEvent -> IO ()
 playEvent as ev = do
   let sample = case ev of
@@ -249,5 +329,7 @@ playEvent as ev = do
         -- dedicated victory fanfare can slot in later via a new
         -- AudioSystem field without touching the dispatch table.
         EvBossKilled    -> asLevelUp as
-  void (try (PA.soundPlay sample 1.0 1.0 0.0 1.0)
+  vol <- readIORef (asSfxVolRef as)
+  let v = realToFrac vol :: Float
+  void (try (PA.soundPlay sample v v 0.0 1.0)
          :: IO (Either SomeException PA.Sound))

@@ -84,6 +84,8 @@ deriving instance Generic SaveMenuEntry
 deriving instance Generic LaunchMenu
 deriving instance Generic LaunchOption
 deriving instance Generic DirectionalAction
+deriving instance Generic VolumeMixer
+deriving instance Generic VolumeChannel
 deriving instance Generic GameState
 
 instance Binary Dir
@@ -120,4 +122,6 @@ instance Binary SaveMenuEntry
 instance Binary LaunchMenu
 instance Binary LaunchOption
 instance Binary DirectionalAction
+instance Binary VolumeMixer
+instance Binary VolumeChannel
 instance Binary GameState

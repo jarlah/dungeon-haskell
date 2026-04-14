@@ -8,6 +8,8 @@ module Game.State.Types
 , SaveMenuEntry(..)
 , LaunchMenu(..)
 , DirectionalAction(..)
+, VolumeMixer(..)
+, VolumeChannel(..)
 , emit
 ) where
 
@@ -253,6 +255,21 @@ data GameState = GameState
     --   this in preference to the live counter once it becomes
     --   'Just' so the timer visibly freezes on victory instead of
     --   continuing to tick while the modal is open.
+  , gsMusicVolume :: !Double
+    -- ^ master music volume in [0, 1]. Mirrored from the audio
+    --   layer's own IORef so the render can show the mixer
+    --   modal's current values without poking at IO; the event
+    --   loop syncs this field back into 'Game.Audio.setMusicVolume'
+    --   every keystroke so the two stay aligned.
+  , gsSfxVolume :: !Double
+    -- ^ master SFX volume in [0, 1]. Same mirroring rule as
+    --   'gsMusicVolume'.
+  , gsVolumeMixer :: !(Maybe VolumeMixer)
+    -- ^ 'Just' when the volume mixer modal is open. Carries the
+    --   cursor position so the player can tab between the music
+    --   and SFX sliders; the actual values live on
+    --   'gsMusicVolume' / 'gsSfxVolume' so they persist across
+    --   modal open/close without a separate snapshot.
   } deriving (Show)
 
 -- | Actions that need a direction supplied /after/ the initiating
@@ -263,6 +280,21 @@ data GameState = GameState
 data DirectionalAction
   = DirCloseDoor
   | DirFire
+  deriving (Eq, Show)
+
+-- | UI state for the volume mixer modal. Only the cursor lives
+--   here — the actual volumes are carried on 'gsMusicVolume' /
+--   'gsSfxVolume' so they're adjustable outside the modal (for
+--   example, seeded from config at startup or restored from a
+--   loaded save) without having to reach into this field.
+newtype VolumeMixer = VolumeMixer
+  { vmCursor :: VolumeChannel
+  } deriving (Eq, Show)
+
+-- | Which slider the mixer cursor is currently focused on.
+data VolumeChannel
+  = VolMusic
+  | VolSfx
   deriving (Eq, Show)
 
 -- | UI state for the save/load picker modal. Kept entirely in

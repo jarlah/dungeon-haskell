@@ -94,6 +94,9 @@ mkFixture npcs = GameState
   , gsSavesUsed      = 0
   , gsFinalTurns     = Nothing
   , gsChests         = []
+  , gsMusicVolume    = 0.7
+  , gsSfxVolume      = 1.0
+  , gsVolumeMixer    = Nothing
   }
 
 -- | A small canned quest used by the 'appendQuestToFirstNPC' tests.

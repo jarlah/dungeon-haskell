@@ -145,5 +145,10 @@ instance Binary SaveHeader
 --     written between the magic and the 'GameState' payload so
 --     'listSaves' can read metadata without decoding the full
 --     game state.
+--   * @DHSAVE13@ — Volume mixer. 'GameState' gained
+--     'gsMusicVolume', 'gsSfxVolume' and 'gsVolumeMixer' so the
+--     player can adjust music and SFX volume from an in-game
+--     modal. The two new 'Double' fields and the 'Maybe
+--     VolumeMixer' ride on the derived 'Binary' instance.
 saveMagic :: BL.ByteString
-saveMagic = BL8.pack "DHSAVE12"
+saveMagic = BL8.pack "DHSAVE13"
